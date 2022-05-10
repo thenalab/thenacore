@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Stream } from "@cloudflare/stream-react";
+import { useCallback, useEffect, useState } from "react";
+import { Stream, StreamPlayerApi } from "@cloudflare/stream-react";
 import { PublicKey } from "@solana/web3.js";
 import {
   programs,
@@ -105,11 +105,27 @@ const VideoArtContent = ({
   files,
   uri,
   animationURL,
+  active,
 }: {
   files?: (MetadataJsonFile | string)[];
   uri?: string;
   animationURL?: string;
+  active?: boolean;
 }) => {
+  const [playerApi, setPlayerApi] = useState<StreamPlayerApi>();
+  const playerRef = useCallback(
+    (ref) => {
+      setPlayerApi(ref);
+    },
+    [setPlayerApi]
+  );
+
+  useEffect(() => {
+    if (playerApi) {
+      playerApi.currentTime = 0;
+    }
+  }, [active, playerApi]);
+
   const likelyVideo = (files || []).filter((f, index, arr) => {
     if (typeof f !== "string") {
       return false;
@@ -124,6 +140,7 @@ const VideoArtContent = ({
     likelyVideo.startsWith("https://watch.videodelivery.net/") ? (
       <div className={"d-block"}>
         <Stream
+          streamRef={(e: any) => playerRef(e)}
           src={likelyVideo.replace("https://watch.videodelivery.net/", "")}
           loop={true}
           height={180}
@@ -220,6 +237,7 @@ const HTMLContent = ({
 export const ArtContent = ({
   metadata,
   category,
+  active,
   pubkey,
   uri,
   animationURL,
@@ -228,6 +246,7 @@ export const ArtContent = ({
 }: {
   metadata: programs.metadata.MetadataData;
   category?: MetaDataJsonCategory;
+  active?: boolean;
   pubkey?: PublicKey | string;
   uri?: string;
   animationURL?: string;
@@ -252,7 +271,12 @@ export const ArtContent = ({
 
   const content =
     category === "video" ? (
-      <VideoArtContent files={files} uri={uri} animationURL={animationURL} />
+      <VideoArtContent
+        files={files}
+        uri={uri}
+        animationURL={animationURL}
+        active={active}
+      />
     ) : category === "html" || animationUrlExt === "html" ? (
       <HTMLContent animationUrl={animationURL} files={files} />
     ) : (

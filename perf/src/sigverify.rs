@@ -3,6 +3,9 @@
 //! cores.  When perf-libs are available signature verification is offloaded
 //! to the GPU.
 //!
+
+#[cfg(test)]
+use solana_sdk::transaction::Transaction;
 use {
     crate::{
         cuda_runtime::PinnedVec,
@@ -709,6 +712,17 @@ pub fn ed25519_verify(
 }
 
 #[cfg(test)]
+pub fn make_packet_from_transaction(tx: Transaction) -> Packet {
+    use bincode::serialize;
+
+    let tx_bytes = serialize(&tx).unwrap();
+    let mut packet = Packet::default();
+    packet.meta.size = tx_bytes.len();
+    packet.data[..packet.meta.size].copy_from_slice(&tx_bytes);
+    packet
+}
+
+#[cfg(test)]
 #[allow(clippy::integer_arithmetic)]
 mod tests {
     use {
@@ -766,7 +780,7 @@ mod tests {
         let tx = test_tx();
         let tx_bytes = serialize(&tx).unwrap();
         let message_data = tx.message_data();
-        let mut packet = Packet::from_data(None, tx.clone()).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx.clone());
 
         let packet_offsets = sigverify::get_packet_offsets(&mut packet, 0, false);
 
@@ -802,7 +816,7 @@ mod tests {
         };
         let mut tx = Transaction::new_unsigned(message);
         tx.signatures = vec![Signature::default(); actual_num_sigs as usize];
-        Packet::from_data(None, tx).unwrap()
+        sigverify::make_packet_from_transaction(tx)
     }
 
     #[test]
@@ -823,7 +837,7 @@ mod tests {
     #[test]
     fn test_small_packet() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         packet.data[0] = 0xff;
         packet.data[1] = 0xff;
@@ -842,7 +856,7 @@ mod tests {
         tx.signatures = vec![sig; NUM_SIG];
         tx.message.account_keys = vec![];
         tx.message.header.num_required_signatures = NUM_SIG as u8;
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
         assert_eq!(res, Err(PacketError::InvalidPubkeyLen));
@@ -878,7 +892,7 @@ mod tests {
         let sig = keypair1.try_sign_message(&tx.message_data()).unwrap();
         tx.signatures = vec![sig; NUM_SIG];
 
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
         assert_eq!(res, Err(PacketError::InvalidPubkeyLen));
@@ -895,7 +909,7 @@ mod tests {
     #[test]
     fn test_large_sig_len() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         // Make the signatures len huge
         packet.data[0] = 0x7f;
@@ -907,7 +921,7 @@ mod tests {
     #[test]
     fn test_really_large_sig_len() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         // Make the signatures len huge
         packet.data[0] = 0xff;
@@ -922,7 +936,7 @@ mod tests {
     #[test]
     fn test_invalid_pubkey_len() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
 
@@ -947,7 +961,7 @@ mod tests {
         };
         let mut tx = Transaction::new_unsigned(message);
         tx.signatures = vec![Signature::default()];
-        let packet = Packet::from_data(None, tx).unwrap();
+        let packet = sigverify::make_packet_from_transaction(tx);
         let res = sigverify::do_get_packet_offsets(&packet, 0);
 
         assert_eq!(res, Err(PacketError::PayerNotWritable));
@@ -956,7 +970,7 @@ mod tests {
     #[test]
     fn test_unsupported_version() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let res = sigverify::do_get_packet_offsets(&packet, 0);
 
@@ -970,7 +984,7 @@ mod tests {
     #[test]
     fn test_versioned_message() {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let mut legacy_offsets = sigverify::do_get_packet_offsets(&packet, 0).unwrap();
 
@@ -1013,7 +1027,7 @@ mod tests {
 
     // Just like get_packet_offsets, but not returning redundant information.
     fn get_packet_offsets_from_tx(tx: Transaction, current_offset: u32) -> PacketOffsets {
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
         let packet_offsets =
             sigverify::get_packet_offsets(&mut packet, current_offset as usize, false);
         PacketOffsets::new(
@@ -1096,7 +1110,7 @@ mod tests {
 
     fn test_verify_n(n: usize, modify_data: bool) {
         let tx = test_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         // jumble some data to test failure
         if modify_data {
@@ -1128,7 +1142,7 @@ mod tests {
         let mut tx = test_tx();
         // pretend malicious leader dropped a signature...
         tx.signatures.pop();
-        let packet = Packet::from_data(None, tx).unwrap();
+        let packet = sigverify::make_packet_from_transaction(tx);
 
         let mut batches = generate_packet_batches(&packet, 1, 1);
 
@@ -1160,7 +1174,7 @@ mod tests {
         solana_logger::setup();
 
         let tx = test_multisig_tx();
-        let mut packet = Packet::from_data(None, tx).unwrap();
+        let mut packet = sigverify::make_packet_from_transaction(tx);
 
         let n = 4;
         let num_batches = 3;
@@ -1196,7 +1210,7 @@ mod tests {
         solana_logger::setup();
 
         let tx = test_multisig_tx();
-        let packet = Packet::from_data(None, tx).unwrap();
+        let packet = sigverify::make_packet_from_transaction(tx);
 
         let recycler = Recycler::default();
         let recycler_out = Recycler::default();
@@ -1340,7 +1354,7 @@ mod tests {
         {
             let mut tx = test_tx();
             tx.message.instructions[0].data = vec![1, 2, 3];
-            let mut packet = Packet::from_data(None, tx).unwrap();
+            let mut packet = sigverify::make_packet_from_transaction(tx);
             let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
             check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
             assert!(!packet.meta.is_simple_vote_tx());
@@ -1350,7 +1364,7 @@ mod tests {
         {
             let mut tx = new_test_vote_tx(&mut rng);
             tx.message.instructions[0].data = vec![1, 2, 3];
-            let mut packet = Packet::from_data(None, tx).unwrap();
+            let mut packet = sigverify::make_packet_from_transaction(tx);
             let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
             check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
             assert!(packet.meta.is_simple_vote_tx());
@@ -1371,7 +1385,7 @@ mod tests {
                     CompiledInstruction::new(4, &(), vec![0, 2]),
                 ],
             );
-            let mut packet = Packet::from_data(None, tx).unwrap();
+            let mut packet = sigverify::make_packet_from_transaction(tx);
             let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
             check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
             assert!(!packet.meta.is_simple_vote_tx());
@@ -1387,9 +1401,11 @@ mod tests {
         let mut batch = PacketBatch::default();
         batch
             .packets
-            .push(Packet::from_data(None, test_tx()).unwrap());
+            .push(sigverify::make_packet_from_transaction(test_tx()));
         let tx = new_test_vote_tx(&mut rng);
-        batch.packets.push(Packet::from_data(None, tx).unwrap());
+        batch
+            .packets
+            .push(sigverify::make_packet_from_transaction(tx));
         batch
             .packets
             .iter_mut()
@@ -1443,7 +1459,7 @@ mod tests {
             let mut batches =
                 to_packet_batches(&(0..1000).map(|_| test_tx()).collect::<Vec<_>>(), 128);
             discard += filter.dedup_packets(&mut batches) as usize;
-            debug!("{} {}", i, discard);
+            println!("{} {}", i, discard);
             if filter.saturated.load(Ordering::Relaxed) {
                 break;
             }
@@ -1459,7 +1475,7 @@ mod tests {
             let mut batches =
                 to_packet_batches(&(0..1024).map(|_| test_tx()).collect::<Vec<_>>(), 128);
             discard += filter.dedup_packets(&mut batches) as usize;
-            debug!("false positive rate: {}/{}", discard, i * 1024);
+            println!("false positive rate: {}/{}", discard, i * 1024);
         }
         //allow for 1 false positive even if extremely unlikely
         assert!(discard < 2);
@@ -1653,7 +1669,7 @@ mod tests {
 
         let test_cases = set_discards.iter().zip(&expect_valids).enumerate();
         for (i, (set_discard, (expect_batch_count, expect_valid_packets))) in test_cases {
-            debug!("test_shrink case: {}", i);
+            println!("test_shrink case: {}", i);
             let mut batches = to_packet_batches(
                 &(0..PACKET_COUNT).map(|_| test_tx()).collect::<Vec<_>>(),
                 PACKETS_PER_BATCH,
@@ -1667,17 +1683,17 @@ mod tests {
                     .for_each(|(j, p)| p.meta.set_discard(set_discard(i, j)))
             });
             assert_eq!(count_valid_packets(&batches), *expect_valid_packets);
-            debug!("show valid packets for case {}", i);
+            println!("show valid packets for case {}", i);
             batches.iter_mut().enumerate().for_each(|(i, b)| {
                 b.packets.iter_mut().enumerate().for_each(|(j, p)| {
                     if !p.meta.discard() {
-                        debug!("{} {}", i, j)
+                        println!("{} {}", i, j)
                     }
                 })
             });
-            debug!("done show valid packets for case {}", i);
+            println!("done show valid packets for case {}", i);
             let shrunken_batch_count = shrink_batches(&mut batches);
-            debug!("shrunk batch test {} count: {}", i, shrunken_batch_count);
+            println!("shrunk batch test {} count: {}", i, shrunken_batch_count);
             assert_eq!(shrunken_batch_count, *expect_batch_count);
             batches.truncate(shrunken_batch_count);
             assert_eq!(count_valid_packets(&batches), *expect_valid_packets);

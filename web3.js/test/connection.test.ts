@@ -20,19 +20,13 @@ import {
   Message,
 } from '../src';
 import invariant from '../src/util/assert';
+import {DEFAULT_TICKS_PER_SLOT, NUM_TICKS_PER_SECOND} from '../src/timing';
 import {MOCK_PORT, url} from './url';
 import {
-  AccountInfo,
   BLOCKHASH_CACHE_TIMEOUT_MS,
-  BlockResponse,
-  BlockSignatures,
   Commitment,
-  ConfirmedBlock,
-  Context,
   EpochInfo,
   InflationGovernor,
-  Logs,
-  SignatureResult,
   SlotInfo,
 } from '../src/connection';
 import {sleep} from '../src/util/sleep';
@@ -77,7 +71,7 @@ const verifySignatureStatus = (
   return status;
 };
 
-describe('Connection', function () {
+describe('Connection', () => {
   let connection: Connection;
   beforeEach(() => {
     connection = new Connection(url);
@@ -1005,17 +999,12 @@ describe('Connection', function () {
       },
     });
 
-    // Find a block that has a transaction.
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let slot = await connection.getFirstAvailableBlock();
-
+    // Find a block that has a transaction, usually Block 1
+    let slot = 0;
     let address: PublicKey | undefined;
     let expectedSignature: string | undefined;
     while (!address || !expectedSignature) {
+      slot++;
       const block = await connection.getConfirmedBlock(slot);
       if (block.transactions.length > 0) {
         const {signature, publicKey} =
@@ -1023,10 +1012,8 @@ describe('Connection', function () {
         if (signature) {
           address = publicKey;
           expectedSignature = bs58.encode(signature);
-          break;
         }
       }
-      slot++;
     }
 
     // getConfirmedSignaturesForAddress tests...
@@ -1187,17 +1174,12 @@ describe('Connection', function () {
       },
     });
 
-    // Find a block that has a transaction.
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let slot = await connection.getFirstAvailableBlock();
-
+    // Find a block that has a transaction, usually Block 1
+    let slot = 0;
     let address: PublicKey | undefined;
     let expectedSignature: string | undefined;
     while (!address || !expectedSignature) {
+      slot++;
       const block = await connection.getConfirmedBlock(slot);
       if (block.transactions.length > 0) {
         const {signature, publicKey} =
@@ -1205,10 +1187,8 @@ describe('Connection', function () {
         if (signature) {
           address = publicKey;
           expectedSignature = bs58.encode(signature);
-          break;
         }
       }
-      slot++;
     }
 
     // getSignaturesForAddress tests...
@@ -1298,24 +1278,17 @@ describe('Connection', function () {
       },
     });
 
-    // Find a block that has a transaction.
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let slot = await connection.getFirstAvailableBlock();
-
+    // Find a block that has a transaction, usually Block 1
+    let slot = 0;
     let confirmedTransaction: string | undefined;
     while (!confirmedTransaction) {
+      slot++;
       const block = await connection.getConfirmedBlock(slot);
       for (const tx of block.transactions) {
         if (tx.transaction.signature) {
           confirmedTransaction = bs58.encode(tx.transaction.signature);
-          break;
         }
       }
-      slot++;
     }
 
     await mockRpcBatchResponse({
@@ -1516,128 +1489,6 @@ describe('Connection', function () {
     expect(result).to.be.empty;
   });
 
-  it('get block height', async () => {
-    const commitment: Commitment = 'confirmed';
-
-    await mockRpcResponse({
-      method: 'getBlockHeight',
-      params: [{commitment: commitment}],
-      value: 10,
-    });
-
-    const blockHeight = await connection.getBlockHeight(commitment);
-    expect(blockHeight).to.be.a('number');
-  });
-
-  it('get block production', async () => {
-    const commitment: Commitment = 'processed';
-
-    // Find slot of the lowest confirmed block
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let firstSlot = await connection.getFirstAvailableBlock();
-
-    // Find current block height
-    await mockRpcResponse({
-      method: 'getBlockHeight',
-      params: [{commitment: commitment}],
-      value: 10,
-    });
-    let lastSlot = await connection.getBlockHeight(commitment);
-
-    const blockProductionConfig = {
-      commitment: commitment,
-      range: {
-        firstSlot,
-        lastSlot,
-      },
-    };
-
-    const blockProductionRet = {
-      byIdentity: {
-        '85iYT5RuzRTDgjyRa3cP8SYhM2j21fj7NhfJ3peu1DPr': [12, 10],
-      },
-      range: {
-        firstSlot,
-        lastSlot,
-      },
-    };
-
-    //mock RPC call with config specified
-    await mockRpcResponse({
-      method: 'getBlockProduction',
-      params: [blockProductionConfig],
-      value: blockProductionRet,
-      withContext: true,
-    });
-
-    //mock RPC call with commitment only
-    await mockRpcResponse({
-      method: 'getBlockProduction',
-      params: [{commitment: commitment}],
-      value: blockProductionRet,
-      withContext: true,
-    });
-
-    const result = await connection.getBlockProduction(blockProductionConfig);
-
-    if (!result) {
-      expect(result).to.be.ok;
-      return;
-    }
-
-    expect(result.context).to.be.ok;
-    expect(result.value).to.be.ok;
-
-    const resultContextSlot = result.context.slot;
-    expect(resultContextSlot).to.be.a('number');
-
-    const resultIdentityDictionary = result.value.byIdentity;
-    expect(resultIdentityDictionary).to.be.a('object');
-
-    for (var key in resultIdentityDictionary) {
-      expect(key).to.be.a('string');
-      expect(resultIdentityDictionary[key]).to.be.a('array');
-      expect(resultIdentityDictionary[key][0]).to.be.a('number');
-      expect(resultIdentityDictionary[key][1]).to.be.a('number');
-    }
-
-    const resultSlotRange = result.value.range;
-    expect(resultSlotRange.firstSlot).to.equal(firstSlot);
-    expect(resultSlotRange.lastSlot).to.equal(lastSlot);
-
-    const resultCommitmentOnly = await connection.getBlockProduction(
-      commitment,
-    );
-
-    if (!resultCommitmentOnly) {
-      expect(resultCommitmentOnly).to.be.ok;
-      return;
-    }
-    expect(resultCommitmentOnly.context).to.be.ok;
-    expect(resultCommitmentOnly.value).to.be.ok;
-
-    const resultCOContextSlot = result.context.slot;
-    expect(resultCOContextSlot).to.be.a('number');
-
-    const resultCOIdentityDictionary = result.value.byIdentity;
-    expect(resultCOIdentityDictionary).to.be.a('object');
-
-    for (var property in resultCOIdentityDictionary) {
-      expect(property).to.be.a('string');
-      expect(resultCOIdentityDictionary[property]).to.be.a('array');
-      expect(resultCOIdentityDictionary[property][0]).to.be.a('number');
-      expect(resultCOIdentityDictionary[property][1]).to.be.a('number');
-    }
-
-    const resultCOSlotRange = result.value.range;
-    expect(resultCOSlotRange.firstSlot).to.equal(firstSlot);
-    expect(resultCOSlotRange.lastSlot).to.equal(lastSlot);
-  });
-
   it('get transaction', async () => {
     await mockRpcResponse({
       method: 'getSlot',
@@ -1700,22 +1551,15 @@ describe('Connection', function () {
       },
     });
 
-    // Find a block that has a transaction.
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let slot = await connection.getFirstAvailableBlock();
-
+    // Find a block that has a transaction, usually Block 1
+    let slot = 0;
     let transaction: string | undefined;
     while (!transaction) {
+      slot++;
       const block = await connection.getBlock(slot);
       if (block && block.transactions.length > 0) {
         transaction = block.transactions[0].transaction.signatures[0];
-        continue;
       }
-      slot++;
     }
 
     await mockRpcResponse({
@@ -1850,24 +1694,17 @@ describe('Connection', function () {
       },
     });
 
-    // Find a block that has a transaction.
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    let slot = await connection.getFirstAvailableBlock();
-
+    // Find a block that has a transaction, usually Block 1
+    let slot = 0;
     let confirmedTransaction: string | undefined;
     while (!confirmedTransaction) {
+      slot++;
       const block = await connection.getConfirmedBlock(slot);
       for (const tx of block.transactions) {
         if (tx.transaction.signature) {
           confirmedTransaction = bs58.encode(tx.transaction.signature);
-          break;
         }
       }
-      slot++;
     }
 
     await mockRpcResponse({
@@ -2048,561 +1885,388 @@ describe('Connection', function () {
     });
   }
 
-  describe('get block', function () {
-    beforeEach(async function () {
-      await mockRpcResponse({
-        method: 'getSlot',
-        params: [],
-        value: 1,
-      });
-
-      while ((await connection.getSlot()) <= 0) {
-        continue;
-      }
+  it('get block', async () => {
+    await mockRpcResponse({
+      method: 'getSlot',
+      params: [],
+      value: 1,
     });
 
-    it('gets the genesis block', async function () {
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [0],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [],
-        },
-      });
+    while ((await connection.getSlot()) <= 0) {
+      continue;
+    }
 
-      let maybeBlock0: BlockResponse | null;
-      try {
-        maybeBlock0 = await connection.getBlock(0);
-      } catch (e) {
-        if (process.env.TEST_LIVE) {
-          console.warn(
-            'WARNING: We ran no assertions about the genesis block because block 0 ' +
-              'could not be found. See https://github.com/solana-labs/solana/issues/23853.',
-          );
-          this.skip();
-        } else {
-          throw e;
-        }
-      }
-      expect(maybeBlock0).not.to.be.null;
-      const block0 = maybeBlock0!;
-
-      // Block 0 never has any transactions in test validator
-      const blockhash0 = block0.blockhash;
-      expect(block0.transactions).to.have.length(0);
-      expect(blockhash0).not.to.be.null;
-      expect(block0.previousBlockhash).not.to.be.null;
-      expect(block0.parentSlot).to.eq(0);
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [0],
+      value: {
+        blockHeight: 0,
+        blockTime: 1614281964,
+        blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        transactions: [],
+      },
     });
 
-    it('gets a block having a parent', async function () {
-      // Mock parent of block with transaction.
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [0],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [],
-        },
-      });
-      // Mock block with transaction.
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [1],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [
-            {
-              meta: {
-                fee: 10000,
-                postBalances: [499260347380, 15298080, 1, 1, 1],
-                preBalances: [499260357380, 15298080, 1, 1, 1],
-                status: {Ok: null},
-                err: null,
-              },
-              transaction: {
-                message: {
-                  accountKeys: [
-                    'va12u4o9DipLEB2z4fuoHszroq1U9NcAB9aooFDPJSf',
-                    '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
-                    'SysvarS1otHashes111111111111111111111111111',
-                    'SysvarC1ock11111111111111111111111111111111',
-                    'Vote111111111111111111111111111111111111111',
-                  ],
-                  header: {
-                    numReadonlySignedAccounts: 0,
-                    numReadonlyUnsignedAccounts: 3,
-                    numRequiredSignatures: 2,
-                  },
-                  instructions: [
-                    {
-                      accounts: [1, 2, 3],
-                      data: '37u9WtQpcm6ULa3VtWDFAWoQc1hUvybPrA3dtx99tgHvvcE7pKRZjuGmn7VX2tC3JmYDYGG7',
-                      programIdIndex: 4,
-                    },
-                  ],
-                  recentBlockhash:
-                    'GeyAFFRY3WGpmam2hbgrKw4rbU2RKzfVLm5QLSeZwTZE',
-                },
-                signatures: [
-                  'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
-                  '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
-                ],
-              },
+    // Block 0 never has any transactions in test validator
+    const block0 = await connection.getBlock(0);
+    if (!block0) {
+      expect(block0).not.to.be.null;
+      return;
+    }
+
+    const blockhash0 = block0.blockhash;
+    expect(block0.transactions).to.have.length(0);
+    expect(blockhash0).not.to.be.null;
+    expect(block0.previousBlockhash).not.to.be.null;
+    expect(block0.parentSlot).to.eq(0);
+
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [1],
+      value: {
+        blockHeight: 0,
+        blockTime: 1614281964,
+        blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        transactions: [
+          {
+            meta: {
+              fee: 10000,
+              postBalances: [499260347380, 15298080, 1, 1, 1],
+              preBalances: [499260357380, 15298080, 1, 1, 1],
+              status: {Ok: null},
+              err: null,
             },
-          ],
-        },
-      });
+            transaction: {
+              message: {
+                accountKeys: [
+                  'va12u4o9DipLEB2z4fuoHszroq1U9NcAB9aooFDPJSf',
+                  '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
+                  'SysvarS1otHashes111111111111111111111111111',
+                  'SysvarC1ock11111111111111111111111111111111',
+                  'Vote111111111111111111111111111111111111111',
+                ],
+                header: {
+                  numReadonlySignedAccounts: 0,
+                  numReadonlyUnsignedAccounts: 3,
+                  numRequiredSignatures: 2,
+                },
+                instructions: [
+                  {
+                    accounts: [1, 2, 3],
+                    data: '37u9WtQpcm6ULa3VtWDFAWoQc1hUvybPrA3dtx99tgHvvcE7pKRZjuGmn7VX2tC3JmYDYGG7',
+                    programIdIndex: 4,
+                  },
+                ],
+                recentBlockhash: 'GeyAFFRY3WGpmam2hbgrKw4rbU2RKzfVLm5QLSeZwTZE',
+              },
+              signatures: [
+                'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
+                '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
+              ],
+            },
+          },
+        ],
+      },
+    });
 
-      // Find a block that has a transaction *and* a parent.
-      await mockRpcResponse({
-        method: 'getFirstAvailableBlock',
-        params: [],
-        value: 0,
-      });
-      let candidateSlot = (await connection.getFirstAvailableBlock()) + 1;
-      let result:
-        | {
-            blockWithTransaction: BlockResponse;
-            parentBlock: BlockResponse;
-          }
-        | undefined;
-      while (!result) {
-        const candidateBlock = await connection.getBlock(candidateSlot);
-        if (candidateBlock && candidateBlock.transactions.length) {
-          const parentBlock = await connection.getBlock(candidateSlot - 1);
+    // Find a block that has a transaction
+    // Compare data with parent
+    let x = 1;
+    while (x < 10) {
+      const block1 = await connection.getBlock(x);
+      if (block1 && block1.transactions.length >= 1) {
+        if (block1.parentSlot == 0) {
+          expect(block1.previousBlockhash).to.eq(blockhash0);
+        } else {
+          const parentBlock = await connection.getBlock(block1.parentSlot);
           if (parentBlock) {
-            result = {blockWithTransaction: candidateBlock, parentBlock};
-            break;
+            expect(block1.previousBlockhash).to.eq(parentBlock.blockhash);
           }
         }
-        candidateSlot++;
+        expect(block1.blockhash).not.to.be.null;
+        expect(block1.transactions[0].transaction).not.to.be.null;
+        break;
       }
+      x++;
+    }
 
-      // Compare data with parent
-      expect(result.blockWithTransaction.previousBlockhash).to.eq(
-        result.parentBlock.blockhash,
-      );
-      expect(result.blockWithTransaction.blockhash).not.to.be.null;
-      expect(result.blockWithTransaction.transactions[0].transaction).not.to.be
-        .null;
-
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [Number.MAX_SAFE_INTEGER],
-        error: {
-          message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-        },
-      });
-      await expect(
-        connection.getBlock(Number.MAX_SAFE_INTEGER),
-      ).to.be.rejectedWith(
-        `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-      );
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [Number.MAX_SAFE_INTEGER],
+      error: {
+        message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+      },
     });
+    await expect(
+      connection.getBlock(Number.MAX_SAFE_INTEGER),
+    ).to.be.rejectedWith(
+      `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+    );
   });
 
-  describe('get confirmed block', function () {
-    beforeEach(async function () {
-      await mockRpcResponse({
-        method: 'getSlot',
-        params: [],
-        value: 1,
-      });
-
-      while ((await connection.getSlot()) <= 0) {
-        continue;
-      }
+  it('get confirmed block', async () => {
+    await mockRpcResponse({
+      method: 'getSlot',
+      params: [],
+      value: 1,
     });
 
-    it('gets the genesis block', async function () {
-      await mockRpcResponse({
-        method: 'getConfirmedBlock',
-        params: [0],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [],
-        },
-      });
+    while ((await connection.getSlot()) <= 0) {
+      continue;
+    }
 
-      let block0: ConfirmedBlock;
-      try {
-        block0 = await connection.getConfirmedBlock(0);
-      } catch (e) {
-        if (process.env.TEST_LIVE) {
-          console.warn(
-            'WARNING: We ran no assertions about the genesis block because block 0 ' +
-              'could not be found. See https://github.com/solana-labs/solana/issues/23853.',
-          );
-          this.skip();
-        } else {
-          throw e;
-        }
-      }
-
-      // Block 0 never has any transactions in test validator
-      const blockhash0 = block0.blockhash;
-      expect(block0.transactions).to.have.length(0);
-      expect(blockhash0).not.to.be.null;
-      expect(block0.previousBlockhash).not.to.be.null;
-      expect(block0.parentSlot).to.eq(0);
+    await mockRpcResponse({
+      method: 'getConfirmedBlock',
+      params: [0],
+      value: {
+        blockTime: 1614281964,
+        blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        transactions: [],
+      },
     });
 
-    it('gets a block having a parent', async function () {
-      // Mock parent of block with transaction.
-      await mockRpcResponse({
-        method: 'getConfirmedBlock',
-        params: [0],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [],
-        },
-      });
-      // Mock block with transaction.
-      await mockRpcResponse({
-        method: 'getConfirmedBlock',
-        params: [1],
-        value: {
-          blockTime: 1614281964,
-          blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          transactions: [
-            {
-              meta: {
-                fee: 10000,
-                postBalances: [499260347380, 15298080, 1, 1, 1],
-                preBalances: [499260357380, 15298080, 1, 1, 1],
-                status: {Ok: null},
-                err: null,
-              },
-              transaction: {
-                message: {
-                  accountKeys: [
-                    'va12u4o9DipLEB2z4fuoHszroq1U9NcAB9aooFDPJSf',
-                    '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
-                    'SysvarS1otHashes111111111111111111111111111',
-                    'SysvarC1ock11111111111111111111111111111111',
-                    'Vote111111111111111111111111111111111111111',
-                  ],
-                  header: {
-                    numReadonlySignedAccounts: 0,
-                    numReadonlyUnsignedAccounts: 3,
-                    numRequiredSignatures: 2,
-                  },
-                  instructions: [
-                    {
-                      accounts: [1, 2, 3],
-                      data: '37u9WtQpcm6ULa3VtWDFAWoQc1hUvybPrA3dtx99tgHvvcE7pKRZjuGmn7VX2tC3JmYDYGG7',
-                      programIdIndex: 4,
-                    },
-                  ],
-                  recentBlockhash:
-                    'GeyAFFRY3WGpmam2hbgrKw4rbU2RKzfVLm5QLSeZwTZE',
-                },
-                signatures: [
-                  'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
-                  '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
-                ],
-              },
+    // Block 0 never has any transactions in test validator
+    const block0 = await connection.getConfirmedBlock(0);
+    const blockhash0 = block0.blockhash;
+    expect(block0.transactions).to.have.length(0);
+    expect(blockhash0).not.to.be.null;
+    expect(block0.previousBlockhash).not.to.be.null;
+    expect(block0.parentSlot).to.eq(0);
+
+    await mockRpcResponse({
+      method: 'getConfirmedBlock',
+      params: [1],
+      value: {
+        blockTime: 1614281964,
+        blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        transactions: [
+          {
+            meta: {
+              fee: 10000,
+              postBalances: [499260347380, 15298080, 1, 1, 1],
+              preBalances: [499260357380, 15298080, 1, 1, 1],
+              status: {Ok: null},
+              err: null,
             },
-          ],
-        },
-      });
+            transaction: {
+              message: {
+                accountKeys: [
+                  'va12u4o9DipLEB2z4fuoHszroq1U9NcAB9aooFDPJSf',
+                  '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
+                  'SysvarS1otHashes111111111111111111111111111',
+                  'SysvarC1ock11111111111111111111111111111111',
+                  'Vote111111111111111111111111111111111111111',
+                ],
+                header: {
+                  numReadonlySignedAccounts: 0,
+                  numReadonlyUnsignedAccounts: 3,
+                  numRequiredSignatures: 2,
+                },
+                instructions: [
+                  {
+                    accounts: [1, 2, 3],
+                    data: '37u9WtQpcm6ULa3VtWDFAWoQc1hUvybPrA3dtx99tgHvvcE7pKRZjuGmn7VX2tC3JmYDYGG7',
+                    programIdIndex: 4,
+                  },
+                ],
+                recentBlockhash: 'GeyAFFRY3WGpmam2hbgrKw4rbU2RKzfVLm5QLSeZwTZE',
+              },
+              signatures: [
+                'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
+                '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
+              ],
+            },
+          },
+        ],
+      },
+    });
 
-      // Find a block that has a transaction *and* a parent.
-      await mockRpcResponse({
-        method: 'getFirstAvailableBlock',
-        params: [],
-        value: 0,
-      });
-      let candidateSlot = (await connection.getFirstAvailableBlock()) + 1;
-      let result:
-        | {
-            blockWithTransaction: ConfirmedBlock;
-            parentBlock: ConfirmedBlock;
-          }
-        | undefined;
-      while (!result) {
-        const candidateBlock = await connection.getConfirmedBlock(
-          candidateSlot,
-        );
-        if (candidateBlock && candidateBlock.transactions.length) {
-          const parentBlock = await connection.getConfirmedBlock(
-            candidateSlot - 1,
-          );
+    // Find a block that has a transaction
+    // Compare data with parent
+    let x = 1;
+    while (x < 10) {
+      const block1 = await connection.getConfirmedBlock(x);
+      if (block1.transactions.length >= 1) {
+        if (block1.parentSlot == 0) {
+          expect(block1.previousBlockhash).to.eq(blockhash0);
+        } else {
+          const parentBlock = await connection.getBlock(block1.parentSlot);
           if (parentBlock) {
-            result = {blockWithTransaction: candidateBlock, parentBlock};
-            break;
+            expect(block1.previousBlockhash).to.eq(parentBlock.blockhash);
           }
         }
-        candidateSlot++;
+        expect(block1.blockhash).not.to.be.null;
+        expect(block1.transactions[0].transaction).not.to.be.null;
+        break;
       }
+      x++;
+    }
 
-      // Compare data with parent
-      expect(result.blockWithTransaction.previousBlockhash).to.eq(
-        result.parentBlock.blockhash,
-      );
-      expect(result.blockWithTransaction.blockhash).not.to.be.null;
-      expect(result.blockWithTransaction.transactions[0].transaction).not.to.be
-        .null;
-
-      await mockRpcResponse({
-        method: 'getConfirmedBlock',
-        params: [Number.MAX_SAFE_INTEGER],
-        error: {
-          message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-        },
-      });
-      await expect(
-        connection.getConfirmedBlock(Number.MAX_SAFE_INTEGER),
-      ).to.be.rejectedWith(
-        `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-      );
+    await mockRpcResponse({
+      method: 'getConfirmedBlock',
+      params: [Number.MAX_SAFE_INTEGER],
+      error: {
+        message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+      },
     });
+    await expect(
+      connection.getConfirmedBlock(Number.MAX_SAFE_INTEGER),
+    ).to.be.rejectedWith(
+      `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+    );
   });
 
   it('get blocks between two slots', async () => {
     await mockRpcResponse({
       method: 'getBlocks',
-      params: [0, 9],
-      value: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      params: [0, 10],
+      value: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     });
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 0,
-    });
+
     await mockRpcResponse({
       method: 'getSlot',
       params: [],
-      value: 9,
+      value: 10,
     });
 
-    while ((await connection.getSlot()) <= 1) {
-      continue;
-    }
-
-    const [startSlot, latestSlot] = await Promise.all([
-      connection.getFirstAvailableBlock(),
-      connection.getSlot(),
-    ]);
-    const blocks = await connection.getBlocks(startSlot, latestSlot);
-    expect(blocks).to.have.length(latestSlot - startSlot + 1);
-    expect(blocks[0]).to.eq(startSlot);
+    const latestSlot = await connection.getSlot();
+    const blocks = await connection.getBlocks(0, latestSlot);
+    expect(blocks).to.have.length(latestSlot);
+    expect(blocks).to.contain(1);
     expect(blocks).to.contain(latestSlot);
-  }).timeout(20 * 1000);
+  });
 
   it('get blocks from starting slot', async () => {
     await mockRpcResponse({
       method: 'getBlocks',
       params: [0],
       value: [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
-        38, 39, 40, 41, 42,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+        39, 40, 41, 42,
       ],
     });
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 0,
-    });
+
     await mockRpcResponse({
       method: 'getSlot',
       params: [],
       value: 20,
     });
 
-    while ((await connection.getSlot()) <= 1) {
+    while ((await connection.getSlot()) <= 0) {
       continue;
     }
 
-    const startSlot = await connection.getFirstAvailableBlock();
-    const [blocks, latestSlot] = await Promise.all([
-      connection.getBlocks(startSlot),
-      connection.getSlot(),
-    ]);
-    if (mockServer) {
-      expect(blocks).to.have.length(43);
-    } else {
-      expect(blocks).to.have.length(latestSlot - startSlot + 1);
-    }
-    expect(blocks[0]).to.eq(startSlot);
+    const blocks = await connection.getBlocks(0);
+    const latestSlot = await connection.getSlot();
+    expect(blocks).to.have.lengthOf.greaterThanOrEqual(latestSlot);
+    expect(blocks).to.contain(1);
     expect(blocks).to.contain(latestSlot);
-  }).timeout(20 * 1000);
+  });
 
-  describe('get block signatures', function () {
-    beforeEach(async function () {
-      await mockRpcResponse({
-        method: 'getSlot',
-        params: [],
-        value: 1,
-      });
-
-      while ((await connection.getSlot()) <= 0) {
-        continue;
-      }
+  it('get block signatures', async () => {
+    await mockRpcResponse({
+      method: 'getSlot',
+      params: [],
+      value: 1,
     });
 
-    it('gets the genesis block', async function () {
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [
-          0,
-          {
-            transactionDetails: 'signatures',
-            rewards: false,
-          },
-        ],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          signatures: [],
-        },
-      });
+    while ((await connection.getSlot()) <= 0) {
+      continue;
+    }
 
-      let block0: BlockSignatures;
-      try {
-        block0 = await connection.getBlockSignatures(0);
-      } catch (e) {
-        if (process.env.TEST_LIVE) {
-          console.warn(
-            'WARNING: We ran no assertions about the genesis block because block 0 ' +
-              'could not be found. See https://github.com/solana-labs/solana/issues/23853.',
-          );
-          this.skip();
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [
+        0,
+        {
+          transactionDetails: 'signatures',
+          rewards: false,
+        },
+      ],
+      value: {
+        blockHeight: 0,
+        blockTime: 1614281964,
+        blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        signatures: [],
+      },
+    });
+
+    // Block 0 never has any transactions in test validator
+    const block0 = await connection.getBlockSignatures(0);
+    const blockhash0 = block0.blockhash;
+    expect(block0.signatures).to.have.length(0);
+    expect(blockhash0).not.to.be.null;
+    expect(block0.previousBlockhash).not.to.be.null;
+    expect(block0.parentSlot).to.eq(0);
+    expect(block0).to.not.have.property('rewards');
+
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [
+        1,
+        {
+          transactionDetails: 'signatures',
+          rewards: false,
+        },
+      ],
+      value: {
+        blockHeight: 1,
+        blockTime: 1614281964,
+        blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
+        previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
+        parentSlot: 0,
+        signatures: [
+          'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
+          '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
+        ],
+      },
+    });
+
+    // Find a block that has a transaction
+    // Compare data with parent
+    let x = 1;
+    while (x < 10) {
+      const block1 = await connection.getBlockSignatures(x);
+      if (block1.signatures.length >= 1) {
+        if (block1.parentSlot == 0) {
+          expect(block1.previousBlockhash).to.eq(blockhash0);
         } else {
-          throw e;
-        }
-      }
-
-      // Block 0 never has any transactions in test validator
-      const blockhash0 = block0.blockhash;
-      expect(block0.signatures).to.have.length(0);
-      expect(blockhash0).not.to.be.null;
-      expect(block0.previousBlockhash).not.to.be.null;
-      expect(block0.parentSlot).to.eq(0);
-      expect(block0).to.not.have.property('rewards');
-    });
-
-    it('gets a block having a parent', async function () {
-      // Mock parent of block with transaction.
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [
-          0,
-          {
-            transactionDetails: 'signatures',
-            rewards: false,
-          },
-        ],
-        value: {
-          blockHeight: 0,
-          blockTime: 1614281964,
-          blockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          signatures: [],
-        },
-      });
-      // Mock block with transaction.
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [
-          1,
-          {
-            transactionDetails: 'signatures',
-            rewards: false,
-          },
-        ],
-        value: {
-          blockHeight: 1,
-          blockTime: 1614281964,
-          blockhash: '57zQNBZBEiHsCZFqsaY6h176ioXy5MsSLmcvHkEyaLGy',
-          previousBlockhash: 'H5nJ91eGag3B5ZSRHZ7zG5ZwXJ6ywCt2hyR8xCsV7xMo',
-          parentSlot: 0,
-          signatures: [
-            'w2Zeq8YkpyB463DttvfzARD7k9ZxGEwbsEw4boEK7jDp3pfoxZbTdLFSsEPhzXhpCcjGi2kHtHFobgX49MMhbWt',
-            '4oCEqwGrMdBeMxpzuWiukCYqSfV4DsSKXSiVVCh1iJ6pS772X7y219JZP3mgqBz5PhsvprpKyhzChjYc3VSBQXzG',
-          ],
-        },
-      });
-
-      // Find a block that has a transaction *and* a parent.
-      await mockRpcResponse({
-        method: 'getFirstAvailableBlock',
-        params: [],
-        value: 0,
-      });
-      let candidateSlot = (await connection.getFirstAvailableBlock()) + 1;
-      let result:
-        | {
-            blockWithTransaction: BlockSignatures;
-            parentBlock: BlockSignatures;
-          }
-        | undefined;
-      while (!result) {
-        const candidateBlock = await connection.getBlockSignatures(
-          candidateSlot,
-        );
-        if (candidateBlock && candidateBlock.signatures.length) {
-          const parentBlock = await connection.getBlockSignatures(
-            candidateSlot - 1,
-          );
+          const parentBlock = await connection.getBlock(block1.parentSlot);
           if (parentBlock) {
-            result = {blockWithTransaction: candidateBlock, parentBlock};
-            break;
+            expect(block1.previousBlockhash).to.eq(parentBlock.blockhash);
           }
         }
-        candidateSlot++;
+        expect(block1.blockhash).not.to.be.null;
+        expect(block1.signatures[0]).not.to.be.null;
+        expect(block1).to.not.have.property('rewards');
+        break;
       }
+      x++;
+    }
 
-      // Compare data with parent
-      expect(result.blockWithTransaction.previousBlockhash).to.eq(
-        result.parentBlock.blockhash,
-      );
-      expect(result.blockWithTransaction.blockhash).not.to.be.null;
-      expect(result.blockWithTransaction.signatures[0]).not.to.be.null;
-      expect(result.blockWithTransaction).to.not.have.property('rewards');
-
-      await mockRpcResponse({
-        method: 'getBlock',
-        params: [Number.MAX_SAFE_INTEGER],
-        error: {
-          message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-        },
-      });
-      await expect(
-        connection.getBlockSignatures(Number.MAX_SAFE_INTEGER),
-      ).to.be.rejectedWith(
-        `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
-      );
+    await mockRpcResponse({
+      method: 'getBlock',
+      params: [Number.MAX_SAFE_INTEGER],
+      error: {
+        message: `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+      },
     });
+    await expect(
+      connection.getBlockSignatures(Number.MAX_SAFE_INTEGER),
+    ).to.be.rejectedWith(
+      `Block not available for slot ${Number.MAX_SAFE_INTEGER}`,
+    );
   });
 
   it('get recent blockhash', async () => {
@@ -2691,13 +2355,7 @@ describe('Connection', function () {
       value: 10000,
     });
 
-    await mockRpcResponse({
-      method: 'getFirstAvailableBlock',
-      params: [],
-      value: 1,
-    });
-    const slot = await connection.getFirstAvailableBlock();
-    const blockTime = await connection.getBlockTime(slot);
+    const blockTime = await connection.getBlockTime(1);
     if (blockTime === null) {
       expect(blockTime).not.to.be.null;
     } else {
@@ -3575,84 +3233,84 @@ describe('Connection', function () {
       );
     });
 
-    describe('given an open websocket connection', () => {
-      beforeEach(async () => {
-        // Open the socket connection and wait for it to become pingable.
-        connection._rpcWebSocket.connect();
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          try {
-            await connection._rpcWebSocket.notify('ping');
-            break;
-            // eslint-disable-next-line no-empty
-          } catch {}
-          await sleep(100);
-        }
-      });
+    // it('account change notification', async () => {
+    //   if (mockServer) {
+    //     console.log('non-live test skipped');
+    //     return;
+    //   }
 
-      it('account change notification', async () => {
-        const connection = new Connection(url, 'confirmed');
-        const owner = Keypair.generate();
+    //   const connection = new Connection(url, 'confirmed');
+    //   const owner = Keypair.generate();
+    //   const programAccount = Keypair.generate();
 
-        let subscriptionId: number | undefined;
-        try {
-          const accountInfoPromise = new Promise<AccountInfo<Buffer>>(
-            resolve => {
-              subscriptionId = connection.onAccountChange(
-                owner.publicKey,
-                resolve,
-                'confirmed',
-              );
-            },
-          );
-          connection.requestAirdrop(owner.publicKey, LAMPORTS_PER_SOL);
-          const accountInfo = await accountInfoPromise;
-          expect(accountInfo.lamports).to.eq(LAMPORTS_PER_SOL);
-          expect(accountInfo.owner.equals(SystemProgram.programId)).to.be.true;
-        } finally {
-          if (subscriptionId != null) {
-            await connection.removeAccountChangeListener(subscriptionId);
-          }
-        }
-      });
+    //   const mockCallback = jest.fn();
 
-      it('program account change notification', async () => {
-        connection._commitment = 'confirmed';
+    //   const subscriptionId = connection.onAccountChange(
+    //     programAccount.publicKey,
+    //     mockCallback,
+    //     'confirmed',
+    //   );
 
-        const owner = Keypair.generate();
-        const programAccount = Keypair.generate();
-        const balanceNeeded =
-          await connection.getMinimumBalanceForRentExemption(0);
+    //   const balanceNeeded = Math.max(
+    //     await connection.getMinimumBalanceForRentExemption(0),
+    //     1,
+    //   );
 
-        let subscriptionId: number | undefined;
-        try {
-          const keyedAccountInfoPromise = new Promise<KeyedAccountInfo>(
-            resolve => {
-              subscriptionId = connection.onProgramAccountChange(
-                SystemProgram.programId,
-                resolve,
-              );
-            },
-          );
+    //   let signature = await connection.requestAirdrop(
+    //     owner.publicKey,
+    //     LAMPORTS_PER_SOL,
+    //   );
+    //   await connection.confirmTransaction(signature);
+    //   try {
+    //     const transaction = new Transaction().add(
+    //       SystemProgram.transfer({
+    //         fromPubkey: owner.publicKey,
+    //         toPubkey: programAccount.publicKey,
+    //         lamports: balanceNeeded,
+    //       }),
+    //     );
+    //     await sendAndConfirmTransaction(connection, transaction, [owner], {
+    //       commitment: 'confirmed',
+    //     });
+    //   } catch (err) {
+    //     await connection.removeAccountChangeListener(subscriptionId);
+    //     throw err;
+    //   }
 
-          await helpers.airdrop({
-            connection,
-            address: owner.publicKey,
-            amount: LAMPORTS_PER_SOL,
-          });
+    //   // Wait for mockCallback to receive a call
+    //   let i = 0;
+    //   for (;;) {
+    //     if (mockCallback.mock.calls.length > 0) {
+    //       break;
+    //     }
 
-          const transaction = new Transaction().add(
-            SystemProgram.transfer({
-              fromPubkey: owner.publicKey,
-              toPubkey: programAccount.publicKey,
-              lamports: balanceNeeded,
-            }),
-          );
-          await sendAndConfirmTransaction(connection, transaction, [owner], {
-            commitment: 'confirmed',
-          });
+    //     if (++i === 30) {
+    //       throw new Error('Account change notification not observed');
+    //     }
+    //     // Sleep for a 1/4 of a slot, notifications only occur after a block is
+    //     // processed
+    //     await sleep((250 * DEFAULT_TICKS_PER_SLOT) / NUM_TICKS_PER_SECOND);
+    //   }
 
-          const keyedAccountInfo = await keyedAccountInfoPromise;
+    //   await connection.removeAccountChangeListener(subscriptionId);
+
+    //   expect(mockCallback.mock.calls[0][0].lamports).to.eq(balanceNeeded);
+    //   expect(mockCallback.mock.calls[0][0].owner).to.eq(SystemProgram.programId);
+    // });
+
+    it('program account change notification', async () => {
+      connection._commitment = 'confirmed';
+
+      const owner = Keypair.generate();
+      const programAccount = Keypair.generate();
+      const balanceNeeded = await connection.getMinimumBalanceForRentExemption(
+        0,
+      );
+
+      let notified = false;
+      const subscriptionId = connection.onProgramAccountChange(
+        SystemProgram.programId,
+        (keyedAccountInfo: KeyedAccountInfo) => {
           if (keyedAccountInfo.accountId.equals(programAccount.publicKey)) {
             expect(keyedAccountInfo.accountInfo.lamports).to.eq(balanceNeeded);
             expect(
@@ -3660,103 +3318,131 @@ describe('Connection', function () {
                 SystemProgram.programId,
               ),
             ).to.be.true;
+            notified = true;
           }
-        } finally {
-          if (subscriptionId != null) {
-            await connection.removeProgramAccountChangeListener(subscriptionId);
-          }
-        }
+        },
+      );
+
+      await helpers.airdrop({
+        connection,
+        address: owner.publicKey,
+        amount: LAMPORTS_PER_SOL,
       });
 
-      it('slot notification', async () => {
-        let subscriptionId: number | undefined;
-        try {
-          const notifiedSlotInfo = await new Promise<SlotInfo>(resolve => {
-            subscriptionId = connection.onSlotChange(resolve);
-          });
-          expect(notifiedSlotInfo.parent).to.be.at.least(0);
-          expect(notifiedSlotInfo.root).to.be.at.least(0);
-          expect(notifiedSlotInfo.slot).to.be.at.least(1);
-        } finally {
-          if (subscriptionId != null) {
-            await connection.removeSlotChangeListener(subscriptionId);
-          }
-        }
-      });
-
-      it('root notification', async () => {
-        let subscriptionId: number | undefined;
-        try {
-          const atLeastTwoRoots = await new Promise<number[]>(resolve => {
-            const roots: number[] = [];
-            subscriptionId = connection.onRootChange(root => {
-              if (roots.length === 2) {
-                return;
-              }
-              roots.push(root);
-              if (roots.length === 2) {
-                // Collect at least two, then resolve.
-                resolve(roots);
-              }
-            });
-          });
-          expect(atLeastTwoRoots[1]).to.be.greaterThan(atLeastTwoRoots[0]);
-        } finally {
-          if (subscriptionId != null) {
-            await connection.removeRootChangeListener(subscriptionId);
-          }
-        }
-      });
-
-      it('signature notification', async () => {
-        const owner = Keypair.generate();
-        const signature = await connection.requestAirdrop(
-          owner.publicKey,
-          LAMPORTS_PER_SOL,
+      try {
+        const transaction = new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: owner.publicKey,
+            toPubkey: programAccount.publicKey,
+            lamports: balanceNeeded,
+          }),
         );
-        const signatureResult = await new Promise<SignatureResult>(resolve => {
-          // NOTE: Signature subscriptions auto-remove themselves, so there's no
-          // need to track the subscription id and remove it when the test ends.
-          connection.onSignature(signature, resolve, 'processed');
+        await sendAndConfirmTransaction(connection, transaction, [owner], {
+          commitment: 'confirmed',
         });
-        expect(signatureResult.err).to.be.null;
-      });
+      } catch (err) {
+        await connection.removeProgramAccountChangeListener(subscriptionId);
+        throw err;
+      }
 
-      it('logs notification', async () => {
-        let subscriptionId: number | undefined;
-        const owner = Keypair.generate();
-        try {
-          const logPromise = new Promise<[Logs, Context]>(resolve => {
-            subscriptionId = connection.onLogs(
-              owner.publicKey,
-              (logs, ctx) => {
-                if (!logs.err) {
-                  resolve([logs, ctx]);
-                }
-              },
-              'processed',
-            );
-          });
-
-          // Execute a transaction so that we can pickup its logs.
-          await connection.requestAirdrop(owner.publicKey, LAMPORTS_PER_SOL);
-
-          const [logsRes, ctx] = await logPromise;
-          expect(ctx.slot).to.be.greaterThan(0);
-          expect(logsRes.logs.length).to.eq(2);
-          expect(logsRes.logs[0]).to.eq(
-            'Program 11111111111111111111111111111111 invoke [1]',
-          );
-          expect(logsRes.logs[1]).to.eq(
-            'Program 11111111111111111111111111111111 success',
-          );
-        } finally {
-          if (subscriptionId != null) {
-            await connection.removeOnLogsListener(subscriptionId);
-          }
+      let i = 0;
+      while (!notified) {
+        if (++i === 30) {
+          throw new Error('Program change notification not observed');
         }
-      });
+        // Sleep for a 1/4 of a slot, notifications only occur after a block is
+        // processed
+        await sleep((250 * DEFAULT_TICKS_PER_SLOT) / NUM_TICKS_PER_SECOND);
+      }
+
+      await connection.removeProgramAccountChangeListener(subscriptionId);
     });
+
+    it('slot notification', async () => {
+      let notifiedSlotInfo: SlotInfo | undefined;
+      const subscriptionId = connection.onSlotChange(slotInfo => {
+        notifiedSlotInfo = slotInfo;
+      });
+
+      // Wait for notification
+      let i = 0;
+      while (!notifiedSlotInfo) {
+        if (++i === 30) {
+          throw new Error('Slot change notification not observed');
+        }
+        // Sleep for a 1/4 of a slot, notifications only occur after a block is
+        // processed
+        await sleep((250 * DEFAULT_TICKS_PER_SLOT) / NUM_TICKS_PER_SECOND);
+      }
+
+      expect(notifiedSlotInfo.parent).to.be.at.least(0);
+      expect(notifiedSlotInfo.root).to.be.at.least(0);
+      expect(notifiedSlotInfo.slot).to.be.at.least(1);
+
+      await connection.removeSlotChangeListener(subscriptionId);
+    });
+
+    it('root notification', async () => {
+      let roots: number[] = [];
+      const subscriptionId = connection.onRootChange(root => {
+        roots.push(root);
+      });
+
+      // Wait for mockCallback to receive a call
+      let i = 0;
+      while (roots.length < 2) {
+        if (++i === 30) {
+          throw new Error('Root change notification not observed');
+        }
+        // Sleep for a 1/4 of a slot, notifications only occur after a block is
+        // processed
+        await sleep((250 * DEFAULT_TICKS_PER_SLOT) / NUM_TICKS_PER_SECOND);
+      }
+
+      expect(roots[1]).to.be.greaterThan(roots[0]);
+      await connection.removeRootChangeListener(subscriptionId);
+    });
+
+    /*
+
+    TODO: debug why this test is flaky. Websocket connection issues?
+
+    it('logs notification', async () => {
+      let listener: number | undefined;
+      const owner = Keypair.generate();
+      const [logsRes, ctx] = await new Promise(resolve => {
+        let received = false;
+        listener = connection.onLogs(
+          owner.publicKey,
+          (logs, ctx) => {
+            if (!logs.err) {
+              received = true;
+              resolve([logs, ctx]);
+            }
+          },
+          'processed',
+        );
+
+        // Send transactions until the log subscription receives an event
+        (async () => {
+          while (!received) {
+            // Execute a transaction so that we can pickup its logs.
+            await connection.requestAirdrop(owner.publicKey, 1  * LAMPORTS_PER_SOL);
+            await sleep(1000);
+          }
+        })();
+      });
+      expect(ctx.slot).to.be.greaterThan(0);
+      expect(logsRes.logs.length).to.eq(2);
+      expect(logsRes.logs[0]).to.eq(
+        'Program 11111111111111111111111111111111 invoke [1]',
+      );
+      expect(logsRes.logs[1]).to.eq(
+        'Program 11111111111111111111111111111111 success',
+      );
+      await connection.removeOnLogsListener(listener!);
+    }).timeout(60 * 1000);
+    */
 
     it('https request', async () => {
       const connection = new Connection('https://api.mainnet-beta.solana.com');

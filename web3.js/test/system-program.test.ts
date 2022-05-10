@@ -46,13 +46,7 @@ describe('SystemProgram', () => {
     const transaction = new Transaction().add(SystemProgram.transfer(params));
     expect(transaction.instructions).to.have.length(1);
     const [systemInstruction] = transaction.instructions;
-    const decodedParams = {
-      ...params,
-      lamports: BigInt(params.lamports),
-    };
-    expect(decodedParams).to.eql(
-      SystemInstruction.decodeTransfer(systemInstruction),
-    );
+    expect(params).to.eql(SystemInstruction.decodeTransfer(systemInstruction));
   });
 
   it('transferWithSeed', () => {
@@ -67,11 +61,7 @@ describe('SystemProgram', () => {
     const transaction = new Transaction().add(SystemProgram.transfer(params));
     expect(transaction.instructions).to.have.length(1);
     const [systemInstruction] = transaction.instructions;
-    const decodedParams = {
-      ...params,
-      lamports: BigInt(params.lamports),
-    };
-    expect(decodedParams).to.eql(
+    expect(params).to.eql(
       SystemInstruction.decodeTransferWithSeed(systemInstruction),
     );
   });

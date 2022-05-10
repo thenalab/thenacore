@@ -280,7 +280,7 @@ EOF
 
     if $maybeFullRpc; then
       args+=(--enable-rpc-transaction-history)
-      args+=(--enable-extended-tx-metadata-storage)
+      args+=(--enable-cpi-and-log-storage)
     fi
 
     if [[ $airdropsEnabled = true ]]; then
@@ -408,7 +408,7 @@ EOF
 
     if $maybeFullRpc; then
       args+=(--enable-rpc-transaction-history)
-      args+=(--enable-extended-tx-metadata-storage)
+      args+=(--enable-cpi-and-log-storage)
     fi
 
 cat >> ~/solana/on-reboot <<EOF

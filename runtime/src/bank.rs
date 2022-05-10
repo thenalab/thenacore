@@ -38,10 +38,7 @@ use solana_sdk::recent_blockhashes_account;
 use {
     crate::{
         account_overrides::AccountOverrides,
-        accounts::{
-            AccountAddressFilter, Accounts, LoadedTransaction, PubkeyAccountSlot,
-            TransactionLoadResult,
-        },
+        accounts::{AccountAddressFilter, Accounts, LoadedTransaction, TransactionLoadResult},
         accounts_db::{
             AccountShrinkThreshold, AccountsDbConfig, SnapshotStorages,
             ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, ACCOUNTS_DB_CONFIG_FOR_TESTING,
@@ -53,21 +50,19 @@ use {
         builtins::{self, BuiltinAction, BuiltinFeatureTransition, Builtins},
         cost_tracker::CostTracker,
         epoch_stakes::{EpochStakes, NodeVoteAccounts},
-        expected_rent_collection::{ExpectedRentCollection, SlotInfoInEpoch},
         inline_spl_associated_token_account, inline_spl_token,
         message_processor::MessageProcessor,
         rent_collector::{CollectedInfo, RentCollector},
-        stake_account::{self, StakeAccount},
         stake_weighted_timestamp::{
             calculate_stake_weighted_timestamp, MaxAllowableDrift, MAX_ALLOWABLE_DRIFT_PERCENTAGE,
             MAX_ALLOWABLE_DRIFT_PERCENTAGE_FAST, MAX_ALLOWABLE_DRIFT_PERCENTAGE_SLOW,
         },
-        stakes::{InvalidCacheEntryReason, Stakes, StakesCache, StakesEnum},
+        stakes::{InvalidCacheEntryReason, Stakes, StakesCache},
         status_cache::{SlotDelta, StatusCache},
         system_instruction_processor::{get_system_account_kind, SystemAccountKind},
         transaction_batch::TransactionBatch,
         transaction_error_metrics::TransactionErrorMetrics,
-        vote_account::{VoteAccount, VoteAccountsHashMap},
+        vote_account::VoteAccount,
         vote_parser,
     },
     byteorder::{ByteOrder, LittleEndian},
@@ -99,8 +94,8 @@ use {
         account_utils::StateMut,
         clock::{
             BankId, Epoch, Slot, SlotCount, SlotIndex, UnixTimestamp, DEFAULT_TICKS_PER_SECOND,
-            INITIAL_RENT_EPOCH, MAX_PROCESSING_AGE, MAX_TRANSACTION_FORWARDING_DELAY,
-            SECONDS_PER_DAY,
+            INITIAL_RENT_EPOCH, MAX_PROCESSING_AGE, MAX_RECENT_BLOCKHASHES,
+            MAX_TRANSACTION_FORWARDING_DELAY, SECONDS_PER_DAY,
         },
         ed25519_program,
         epoch_info::EpochInfo,
@@ -130,7 +125,6 @@ use {
         signature::{Keypair, Signature},
         slot_hashes::SlotHashes,
         slot_history::{Check, SlotHistory},
-        stake::state::Delegation,
         system_transaction,
         sysvar::{self, Sysvar, SysvarId},
         timing::years_as_slots,
@@ -138,10 +132,7 @@ use {
             MessageHash, Result, SanitizedTransaction, Transaction, TransactionError,
             TransactionVerificationMode, VersionedTransaction,
         },
-        transaction_context::{
-            ExecutionRecord, InstructionTrace, TransactionAccount, TransactionContext,
-            TransactionReturnData,
-        },
+        transaction_context::{InstructionTrace, TransactionAccount, TransactionContext},
     },
     solana_stake_program::stake_state::{
         self, InflationPointCalculationEvent, PointValue, StakeState,
@@ -153,12 +144,13 @@ use {
         collections::{HashMap, HashSet},
         convert::{TryFrom, TryInto},
         fmt, mem,
-        ops::{Deref, Div, RangeInclusive},
+        ops::{Div, RangeInclusive},
         path::PathBuf,
+        ptr,
         rc::Rc,
         sync::{
             atomic::{
-                AtomicBool, AtomicU64, AtomicUsize,
+                AtomicBool, AtomicU64,
                 Ordering::{AcqRel, Acquire, Relaxed, Release},
             },
             Arc, LockResult, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -173,9 +165,6 @@ struct RewardsMetrics {
     calculate_points_us: AtomicU64,
     store_stake_accounts_us: AtomicU64,
     store_vote_accounts_us: AtomicU64,
-    invalid_cached_vote_accounts: usize,
-    invalid_cached_stake_accounts: usize,
-    vote_accounts_cache_miss_count: usize,
 }
 
 mod address_lookup_table;
@@ -186,8 +175,6 @@ mod transaction_account_state_info;
 pub const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 60.0 * 60.0;
 
 pub const MAX_LEADER_SCHEDULE_STAKES: Epoch = 5;
-
-pub type Rewrites = RwLock<HashMap<Pubkey, Hash>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RentDebit {
@@ -245,7 +232,7 @@ pub type BankSlotDelta = SlotDelta<Result<()>>;
 // Eager rent collection repeats in cyclic manner.
 // Each cycle is composed of <partition_count> number of tiny pubkey subranges
 // to scan, which is always multiple of the number of slots in epoch.
-pub(crate) type PartitionIndex = u64;
+type PartitionIndex = u64;
 type PartitionsPerCycle = u64;
 type Partition = (PartitionIndex, PartitionIndex, PartitionsPerCycle);
 type RentCollectionCycleParams = (
@@ -602,7 +589,6 @@ pub struct TransactionExecutionDetails {
     pub log_messages: Option<Vec<String>>,
     pub inner_instructions: Option<InnerInstructionsList>,
     pub durable_nonce_fee: Option<DurableNonceFee>,
-    pub return_data: Option<TransactionReturnData>,
     pub executed_units: u64,
 }
 
@@ -699,7 +685,6 @@ pub struct TransactionSimulationResult {
     pub logs: TransactionLogMessages,
     pub post_simulation_accounts: Vec<TransactionAccount>,
     pub units_consumed: u64,
-    pub return_data: Option<TransactionReturnData>,
 }
 pub struct TransactionBalancesSet {
     pub pre_balances: TransactionBalances,
@@ -725,7 +710,7 @@ pub type InnerInstructions = Vec<CompiledInstruction>;
 /// a transaction
 pub type InnerInstructionsList = Vec<InnerInstructions>;
 
-/// Convert from an InstructionTrace to InnerInstructionsList
+/// Convert from an IntrustionTrace to InnerInstructionsList
 pub fn inner_instructions_list_from_instruction_trace(
     instruction_trace: &InstructionTrace,
 ) -> InnerInstructionsList {
@@ -918,7 +903,7 @@ impl NonceInfo for NonceFull {
 // Bank's common fields shared by all supported snapshot versions for deserialization.
 // Sync fields with BankFieldsToSerialize! This is paired with it.
 // All members are made public to remain Bank's members private and to make versioned deserializer workable on this
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct BankFieldsToDeserialize {
     pub(crate) blockhash_queue: BlockhashQueue,
     pub(crate) ancestors: AncestorsForSerialization,
@@ -947,7 +932,7 @@ pub(crate) struct BankFieldsToDeserialize {
     pub(crate) rent_collector: RentCollector,
     pub(crate) epoch_schedule: EpochSchedule,
     pub(crate) inflation: Inflation,
-    pub(crate) stakes: Stakes<Delegation>,
+    pub(crate) stakes: Stakes,
     pub(crate) epoch_stakes: HashMap<Epoch, EpochStakes>,
     pub(crate) is_delta: bool,
     pub(crate) accounts_data_len: u64,
@@ -995,101 +980,39 @@ pub(crate) struct BankFieldsToSerialize<'a> {
 // Can't derive PartialEq because RwLock doesn't implement PartialEq
 impl PartialEq for Bank {
     fn eq(&self, other: &Self) -> bool {
-        if std::ptr::eq(self, other) {
+        if ptr::eq(self, other) {
             return true;
         }
-        let Self {
-            rc: _,
-            src: _,
-            blockhash_queue,
-            ancestors,
-            hash,
-            parent_hash,
-            parent_slot,
-            hard_forks,
-            transaction_count,
-            transaction_error_count: _,
-            transaction_entries_count: _,
-            transactions_per_entry_max: _,
-            tick_height,
-            signature_count,
-            capitalization,
-            max_tick_height,
-            hashes_per_tick,
-            ticks_per_slot,
-            ns_per_slot,
-            genesis_creation_time,
-            slots_per_year,
-            slot,
-            bank_id: _,
-            epoch,
-            block_height,
-            collector_id,
-            collector_fees,
-            fee_calculator,
-            fee_rate_governor,
-            collected_rent,
-            rent_collector,
-            epoch_schedule,
-            inflation,
-            stakes_cache,
-            epoch_stakes,
-            is_delta,
-            // TODO: Confirm if all these fields are intentionally ignored!
-            builtin_programs: _,
-            compute_budget: _,
-            builtin_feature_transitions: _,
-            rewards: _,
-            cluster_type: _,
-            lazy_rent_collection: _,
-            rewards_pool_pubkeys: _,
-            cached_executors: _,
-            transaction_debug_keys: _,
-            transaction_log_collector_config: _,
-            transaction_log_collector: _,
-            feature_set: _,
-            drop_callback: _,
-            freeze_started: _,
-            vote_only_bank: _,
-            cost_tracker: _,
-            rewrites_skipped_this_slot: _,
-            sysvar_cache: _,
-            accounts_data_len: _,
-            fee_structure: _,
-            // Ignore new fields explicitly if they do not impact PartialEq.
-            // Adding ".." will remove compile-time checks that if a new field
-            // is added to the struct, this ParitalEq is accordingly updated.
-        } = self;
-        *blockhash_queue.read().unwrap() == *other.blockhash_queue.read().unwrap()
-            && ancestors == &other.ancestors
-            && *hash.read().unwrap() == *other.hash.read().unwrap()
-            && parent_hash == &other.parent_hash
-            && parent_slot == &other.parent_slot
-            && *hard_forks.read().unwrap() == *other.hard_forks.read().unwrap()
-            && transaction_count.load(Relaxed) == other.transaction_count.load(Relaxed)
-            && tick_height.load(Relaxed) == other.tick_height.load(Relaxed)
-            && signature_count.load(Relaxed) == other.signature_count.load(Relaxed)
-            && capitalization.load(Relaxed) == other.capitalization.load(Relaxed)
-            && max_tick_height == &other.max_tick_height
-            && hashes_per_tick == &other.hashes_per_tick
-            && ticks_per_slot == &other.ticks_per_slot
-            && ns_per_slot == &other.ns_per_slot
-            && genesis_creation_time == &other.genesis_creation_time
-            && slots_per_year == &other.slots_per_year
-            && slot == &other.slot
-            && epoch == &other.epoch
-            && block_height == &other.block_height
-            && collector_id == &other.collector_id
-            && collector_fees.load(Relaxed) == other.collector_fees.load(Relaxed)
-            && fee_calculator == &other.fee_calculator
-            && fee_rate_governor == &other.fee_rate_governor
-            && collected_rent.load(Relaxed) == other.collected_rent.load(Relaxed)
-            && rent_collector == &other.rent_collector
-            && epoch_schedule == &other.epoch_schedule
-            && *inflation.read().unwrap() == *other.inflation.read().unwrap()
-            && *stakes_cache.stakes() == *other.stakes_cache.stakes()
-            && epoch_stakes == &other.epoch_stakes
-            && is_delta.load(Relaxed) == other.is_delta.load(Relaxed)
+        *self.blockhash_queue.read().unwrap() == *other.blockhash_queue.read().unwrap()
+            && self.ancestors == other.ancestors
+            && *self.hash.read().unwrap() == *other.hash.read().unwrap()
+            && self.parent_hash == other.parent_hash
+            && self.parent_slot == other.parent_slot
+            && *self.hard_forks.read().unwrap() == *other.hard_forks.read().unwrap()
+            && self.transaction_count.load(Relaxed) == other.transaction_count.load(Relaxed)
+            && self.tick_height.load(Relaxed) == other.tick_height.load(Relaxed)
+            && self.signature_count.load(Relaxed) == other.signature_count.load(Relaxed)
+            && self.capitalization.load(Relaxed) == other.capitalization.load(Relaxed)
+            && self.max_tick_height == other.max_tick_height
+            && self.hashes_per_tick == other.hashes_per_tick
+            && self.ticks_per_slot == other.ticks_per_slot
+            && self.ns_per_slot == other.ns_per_slot
+            && self.genesis_creation_time == other.genesis_creation_time
+            && self.slots_per_year == other.slots_per_year
+            && self.slot == other.slot
+            && self.epoch == other.epoch
+            && self.block_height == other.block_height
+            && self.collector_id == other.collector_id
+            && self.collector_fees.load(Relaxed) == other.collector_fees.load(Relaxed)
+            && self.fee_calculator == other.fee_calculator
+            && self.fee_rate_governor == other.fee_rate_governor
+            && self.collected_rent.load(Relaxed) == other.collected_rent.load(Relaxed)
+            && self.rent_collector == other.rent_collector
+            && self.epoch_schedule == other.epoch_schedule
+            && *self.inflation.read().unwrap() == *other.inflation.read().unwrap()
+            && *self.stakes_cache.stakes() == *other.stakes_cache.stakes()
+            && self.epoch_stakes == other.epoch_stakes
+            && self.is_delta.load(Relaxed) == other.is_delta.load(Relaxed)
     }
 }
 
@@ -1309,7 +1232,6 @@ pub struct Bank {
 
     pub feature_set: Arc<FeatureSet>,
 
-    /// callback function only to be called when dropping and should only be called once
     pub drop_callback: RwLock<OptionalDropCallback>,
 
     pub freeze_started: AtomicBool,
@@ -1320,9 +1242,6 @@ pub struct Bank {
 
     sysvar_cache: RwLock<SysvarCache>,
 
-    /// (Pubkey, account Hash) for each account that would have been rewritten in rent collection for this slot
-    pub rewrites_skipped_this_slot: Rewrites,
-
     /// Current size of the accounts data.  Used when processing messages to enforce a limit on its
     /// maximum size.
     accounts_data_len: AtomicU64,
@@ -1331,33 +1250,27 @@ pub struct Bank {
     pub fee_structure: FeeStructure,
 }
 
+impl Default for BlockhashQueue {
+    fn default() -> Self {
+        Self::new(MAX_RECENT_BLOCKHASHES)
+    }
+}
+
 struct VoteWithStakeDelegations {
     vote_state: Arc<VoteState>,
     vote_account: AccountSharedData,
-    // TODO: use StakeAccount<Delegation> once the old code is deleted.
-    delegations: Vec<(Pubkey, StakeAccount<()>)>,
+    delegations: Vec<(Pubkey, (StakeState, AccountSharedData))>,
 }
 
 struct LoadVoteAndStakeAccountsResult {
     vote_with_stake_delegations_map: DashMap<Pubkey, VoteWithStakeDelegations>,
     invalid_stake_keys: DashMap<Pubkey, InvalidCacheEntryReason>,
     invalid_vote_keys: DashMap<Pubkey, InvalidCacheEntryReason>,
-    invalid_cached_vote_accounts: usize,
-    invalid_cached_stake_accounts: usize,
-    vote_accounts_cache_miss_count: usize,
 }
 
 #[derive(Debug, Default)]
 pub struct NewBankOptions {
     pub vote_only_bank: bool,
-}
-
-#[derive(Debug)]
-struct PrevEpochInflationRewards {
-    validator_rewards: u64,
-    prev_epoch_duration_in_years: f64,
-    validator_rate: f64,
-    foundation_rate: f64,
 }
 
 impl Bank {
@@ -1421,7 +1334,6 @@ impl Bank {
 
     fn default_with_accounts(accounts: Accounts) -> Self {
         let bank = Self {
-            rewrites_skipped_this_slot: Rewrites::default(),
             rc: BankRc::new(accounts, Slot::default()),
             src: StatusCacheRc::default(),
             blockhash_queue: RwLock::<BlockhashQueue>::default(),
@@ -1471,7 +1383,7 @@ impl Bank {
             ),
             transaction_log_collector: Arc::<RwLock<TransactionLogCollector>>::default(),
             feature_set: Arc::<FeatureSet>::default(),
-            drop_callback: RwLock::new(OptionalDropCallback(None)),
+            drop_callback: RwLock::<OptionalDropCallback>::default(),
             freeze_started: AtomicBool::default(),
             vote_only_bank: false,
             cost_tracker: RwLock::<CostTracker>::default(),
@@ -1580,11 +1492,10 @@ impl Bank {
         // genesis needs stakes for all epochs up to the epoch implied by
         //  slot = 0 and genesis configuration
         {
-            let stakes = bank.stakes_cache.stakes().clone();
-            let stakes = Arc::new(StakesEnum::from(stakes));
+            let stakes = bank.stakes_cache.stakes();
             for epoch in 0..=bank.get_leader_schedule_epoch(bank.slot) {
                 bank.epoch_stakes
-                    .insert(epoch, EpochStakes::new(stakes.clone(), epoch));
+                    .insert(epoch, EpochStakes::new(&stakes, epoch));
             }
             bank.update_stake_history(None);
         }
@@ -1748,7 +1659,6 @@ impl Bank {
 
         let accounts_data_len = parent.load_accounts_data_len();
         let mut new = Bank {
-            rewrites_skipped_this_slot: Rewrites::default(),
             rc,
             src,
             slot,
@@ -1868,7 +1778,7 @@ impl Bank {
                         "update_epoch_stakes",
                     );
 
-                    let mut metrics = RewardsMetrics::default();
+                    let metrics = RewardsMetrics::default();
                     // After saving a snapshot of stakes, apply stake rewards and commission
                     let (_, update_rewards_with_thread_pool_time) = Measure::this(
                         |_| {
@@ -1876,7 +1786,7 @@ impl Bank {
                                 parent_epoch,
                                 reward_calc_tracer,
                                 &thread_pool,
-                                &mut metrics,
+                                &metrics,
                             )
                         },
                         (),
@@ -1923,21 +1833,6 @@ impl Bank {
                         (
                             "store_vote_accounts_us",
                             metrics.store_vote_accounts_us.load(Relaxed),
-                            i64
-                        ),
-                        (
-                            "invalid_cached_vote_accounts",
-                            metrics.invalid_cached_vote_accounts,
-                            i64
-                        ),
-                        (
-                            "invalid_cached_stake_accounts",
-                            metrics.invalid_cached_stake_accounts,
-                            i64
-                        ),
-                        (
-                            "vote_accounts_cache_miss_count",
-                            metrics.vote_accounts_cache_miss_count,
                             i64
                         ),
                     );
@@ -2082,33 +1977,15 @@ impl Bank {
         debug_do_not_add_builtins: bool,
         accounts_data_len: u64,
     ) -> Self {
-        let now = Instant::now();
-        let ancestors = Ancestors::from(&fields.ancestors);
-        // For backward compatibility, we can only serialize and deserialize
-        // Stakes<Delegation> in BankFieldsTo{Serialize,Deserialize}. But Bank
-        // caches Stakes<StakeAccount>. Below Stakes<StakeAccount> is obtained
-        // from Stakes<Delegation> by reading the full account state from
-        // accounts-db. Note that it is crucial that these accounts are loaded
-        // at the right slot and match precisely with serialized Delegations.
-        let stakes = Stakes::new(&fields.stakes, |pubkey| {
-            let (account, _slot) = bank_rc.accounts.load_with_fixed_root(&ancestors, pubkey)?;
-            Some(account)
-        })
-        .expect(
-            "Stakes cache is inconsistent with accounts-db. This can indicate \
-            a corrupted snapshot or bugs in cached accounts or accounts-db.",
-        );
-        let stakes_accounts_load_duration = now.elapsed();
         fn new<T: Default>() -> T {
             T::default()
         }
         let feature_set = new();
         let mut bank = Self {
-            rewrites_skipped_this_slot: Rewrites::default(),
             rc: bank_rc,
             src: new(),
             blockhash_queue: RwLock::new(fields.blockhash_queue),
-            ancestors,
+            ancestors: Ancestors::from(&fields.ancestors),
             hash: RwLock::new(fields.hash),
             parent_hash: fields.parent_hash,
             parent_slot: fields.parent_slot,
@@ -2139,7 +2016,7 @@ impl Bank {
             rent_collector: Self::get_rent_collector_from(&fields.rent_collector, fields.epoch),
             epoch_schedule: fields.epoch_schedule,
             inflation: Arc::new(RwLock::new(fields.inflation)),
-            stakes_cache: StakesCache::new(stakes),
+            stakes_cache: StakesCache::new(fields.stakes),
             epoch_stakes: fields.epoch_stakes,
             is_delta: AtomicBool::new(fields.is_delta),
             builtin_programs: new(),
@@ -2222,11 +2099,6 @@ impl Bank {
                 accounts_data_len as i64,
                 i64
             ),
-            (
-                "stakes_accounts_load_duration_us",
-                stakes_accounts_load_duration.as_micros(),
-                i64
-            ),
         );
         bank
     }
@@ -2292,7 +2164,7 @@ impl Bank {
     }
 
     pub fn first_normal_epoch(&self) -> Epoch {
-        self.epoch_schedule().first_normal_epoch
+        self.epoch_schedule.first_normal_epoch
     }
 
     pub fn freeze_lock(&self) -> RwLockReadGuard<Hash> {
@@ -2383,7 +2255,7 @@ impl Bank {
             } else {
                 self.epoch()
             };
-            let first_slot_in_epoch = self.epoch_schedule().get_first_slot_in_epoch(epoch);
+            let first_slot_in_epoch = self.epoch_schedule.get_first_slot_in_epoch(epoch);
             Some((first_slot_in_epoch, self.clock().epoch_start_timestamp))
         };
         let max_allowable_drift = if self
@@ -2431,8 +2303,8 @@ impl Bank {
         let clock = sysvar::clock::Clock {
             slot: self.slot,
             epoch_start_timestamp,
-            epoch: self.epoch_schedule().get_epoch(self.slot),
-            leader_schedule_epoch: self.epoch_schedule().get_leader_schedule_epoch(self.slot),
+            epoch: self.epoch_schedule.get_epoch(self.slot),
+            leader_schedule_epoch: self.epoch_schedule.get_leader_schedule_epoch(self.slot),
             unix_timestamp,
         };
         self.update_sysvar_account(&sysvar::clock::id(), |account| {
@@ -2499,9 +2371,9 @@ impl Bank {
             self.epoch_stakes.retain(|&epoch, _| {
                 epoch >= leader_schedule_epoch.saturating_sub(MAX_LEADER_SCHEDULE_STAKES)
             });
-            let stakes = self.stakes_cache.stakes().clone();
-            let stakes = Arc::new(StakesEnum::from(stakes));
-            let new_epoch_stakes = EpochStakes::new(stakes, leader_schedule_epoch);
+
+            let new_epoch_stakes =
+                EpochStakes::new(&self.stakes_cache.stakes(), leader_schedule_epoch);
             {
                 let vote_stakes: HashMap<_, _> = self
                     .stakes_cache
@@ -2549,7 +2421,7 @@ impl Bank {
     fn update_epoch_schedule(&self) {
         self.update_sysvar_account(&sysvar::epoch_schedule::id(), |account| {
             create_account(
-                self.epoch_schedule(),
+                &self.epoch_schedule,
                 self.inherit_specially_retained_account_fields(account),
             )
         });
@@ -2572,7 +2444,7 @@ impl Bank {
         // period: time that has passed as a fraction of a year, basically the length of
         //  an epoch as a fraction of a year
         //  calculated as: slots_elapsed / (slots / year)
-        self.epoch_schedule().get_slots_in_epoch(prev_epoch) as f64 / self.slots_per_year
+        self.epoch_schedule.get_slots_in_epoch(prev_epoch) as f64 / self.slots_per_year
     }
 
     // Calculates the starting-slot for inflation from the activation slot.
@@ -2598,12 +2470,12 @@ impl Bank {
     fn get_inflation_num_slots(&self) -> u64 {
         let inflation_activation_slot = self.get_inflation_start_slot();
         // Normalize inflation_start to align with the start of rewards accrual.
-        let inflation_start_slot = self.epoch_schedule().get_first_slot_in_epoch(
-            self.epoch_schedule()
+        let inflation_start_slot = self.epoch_schedule.get_first_slot_in_epoch(
+            self.epoch_schedule
                 .get_epoch(inflation_activation_slot)
                 .saturating_sub(1),
         );
-        self.epoch_schedule().get_first_slot_in_epoch(self.epoch()) - inflation_start_slot
+        self.epoch_schedule.get_first_slot_in_epoch(self.epoch()) - inflation_start_slot
     }
 
     pub fn slot_in_year_for_inflation(&self) -> f64 {
@@ -2613,12 +2485,17 @@ impl Bank {
         num_slots as f64 / self.slots_per_year
     }
 
-    fn calculate_previous_epoch_inflation_rewards(
-        &self,
-        prev_epoch_capitalization: u64,
+    // update rewards based on the previous epoch
+    fn update_rewards_with_thread_pool(
+        &mut self,
         prev_epoch: Epoch,
-    ) -> PrevEpochInflationRewards {
+        reward_calc_tracer: Option<impl Fn(&RewardCalculationEvent) + Send + Sync>,
+        thread_pool: &ThreadPool,
+        metrics: &RewardsMetrics,
+    ) {
         let slot_in_year = self.slot_in_year_for_inflation();
+        let epoch_duration_in_years = self.epoch_duration_in_years(prev_epoch);
+
         let (validator_rate, foundation_rate) = {
             let inflation = self.inflation.read().unwrap();
             (
@@ -2627,49 +2504,33 @@ impl Bank {
             )
         };
 
-        let prev_epoch_duration_in_years = self.epoch_duration_in_years(prev_epoch);
-        let validator_rewards = (validator_rate
-            * prev_epoch_capitalization as f64
-            * prev_epoch_duration_in_years) as u64;
-
-        PrevEpochInflationRewards {
-            validator_rewards,
-            prev_epoch_duration_in_years,
-            validator_rate,
-            foundation_rate,
-        }
-    }
-
-    // update rewards based on the previous epoch
-    fn update_rewards_with_thread_pool(
-        &mut self,
-        prev_epoch: Epoch,
-        reward_calc_tracer: Option<impl Fn(&RewardCalculationEvent) + Send + Sync>,
-        thread_pool: &ThreadPool,
-        metrics: &mut RewardsMetrics,
-    ) {
         let capitalization = self.capitalization();
-        let PrevEpochInflationRewards {
-            validator_rewards,
-            prev_epoch_duration_in_years,
-            validator_rate,
-            foundation_rate,
-        } = self.calculate_previous_epoch_inflation_rewards(capitalization, prev_epoch);
+        let validator_rewards =
+            (validator_rate * capitalization as f64 * epoch_duration_in_years) as u64;
 
         let old_vote_balance_and_staked = self.stakes_cache.stakes().vote_balance_and_staked();
-        let update_rewards_from_cached_accounts = self
-            .feature_set
-            .is_active(&feature_set::update_rewards_from_cached_accounts::id());
 
-        self.pay_validator_rewards_with_thread_pool(
+        let validator_point_value = self.pay_validator_rewards_with_thread_pool(
             prev_epoch,
             validator_rewards,
             reward_calc_tracer,
-            self.credits_auto_rewind(),
+            self.stake_program_advance_activating_credits_observed(),
             thread_pool,
             metrics,
-            update_rewards_from_cached_accounts,
         );
+
+        if !self
+            .feature_set
+            .is_active(&feature_set::deprecate_rewards_sysvar::id())
+        {
+            // this sysvar can be retired once `pico_inflation` is enabled on all clusters
+            self.update_sysvar_account(&sysvar::rewards::id(), |account| {
+                create_account(
+                    &sysvar::rewards::Rewards::new(validator_point_value),
+                    self.inherit_specially_retained_account_fields(account),
+                )
+            });
+        }
 
         let new_vote_balance_and_staked = self.stakes_cache.stakes().vote_balance_and_staked();
         let validator_rewards_paid = new_vote_balance_and_staked - old_vote_balance_and_staked;
@@ -2716,7 +2577,7 @@ impl Bank {
             ("epoch", prev_epoch, i64),
             ("validator_rate", validator_rate, f64),
             ("foundation_rate", foundation_rate, f64),
-            ("epoch_duration_in_years", prev_epoch_duration_in_years, f64),
+            ("epoch_duration_in_years", epoch_duration_in_years, f64),
             ("validator_rewards", validator_rewards_paid, i64),
             ("active_stake", active_stake, i64),
             ("pre_capitalization", capitalization, i64),
@@ -2735,72 +2596,52 @@ impl Bank {
         reward_calc_tracer: Option<impl Fn(&RewardCalculationEvent) + Send + Sync>,
     ) -> LoadVoteAndStakeAccountsResult {
         let stakes = self.stakes_cache.stakes();
-        let cached_vote_accounts = stakes.vote_accounts();
-        let vote_with_stake_delegations_map = DashMap::with_capacity(cached_vote_accounts.len());
+        let vote_with_stake_delegations_map =
+            DashMap::with_capacity(stakes.vote_accounts().as_ref().len());
         let invalid_stake_keys: DashMap<Pubkey, InvalidCacheEntryReason> = DashMap::new();
         let invalid_vote_keys: DashMap<Pubkey, InvalidCacheEntryReason> = DashMap::new();
-        let invalid_cached_stake_accounts = AtomicUsize::default();
-        let invalid_cached_vote_accounts = AtomicUsize::default();
 
         let stake_delegations: Vec<_> = stakes.stake_delegations().iter().collect();
         thread_pool.install(|| {
             stake_delegations
                 .into_par_iter()
-                .for_each(|(stake_pubkey, cached_stake_account)| {
-                    let delegation = cached_stake_account.delegation();
+                .for_each(|(stake_pubkey, delegation)| {
                     let vote_pubkey = &delegation.voter_pubkey;
                     if invalid_vote_keys.contains_key(vote_pubkey) {
                         return;
                     }
-                    let stake_account = match self.get_account_with_fixed_root(stake_pubkey) {
-                        Some(stake_account) => stake_account,
+
+                    let stake_delegation = match self.get_account_with_fixed_root(stake_pubkey) {
+                        Some(stake_account) => {
+                            if stake_account.owner() != &solana_stake_program::id() {
+                                invalid_stake_keys
+                                    .insert(*stake_pubkey, InvalidCacheEntryReason::WrongOwner);
+                                return;
+                            }
+
+                            match stake_account.state().ok() {
+                                Some(stake_state) => (*stake_pubkey, (stake_state, stake_account)),
+                                None => {
+                                    invalid_stake_keys
+                                        .insert(*stake_pubkey, InvalidCacheEntryReason::BadState);
+                                    return;
+                                }
+                            }
+                        }
                         None => {
                             invalid_stake_keys
                                 .insert(*stake_pubkey, InvalidCacheEntryReason::Missing);
                             return;
                         }
                     };
-                    let stake_account = match StakeAccount::<()>::try_from(stake_account) {
-                        Ok(stake_account) => stake_account,
-                        Err(stake_account::Error::InvalidOwner { .. }) => {
-                            invalid_stake_keys
-                                .insert(*stake_pubkey, InvalidCacheEntryReason::WrongOwner);
-                            return;
-                        }
-                        Err(stake_account::Error::InstructionError(_)) => {
-                            invalid_stake_keys
-                                .insert(*stake_pubkey, InvalidCacheEntryReason::BadState);
-                            return;
-                        }
-                        Err(stake_account::Error::InvalidDelegation(_)) => {
-                            // This should not happen.
-                            error!(
-                                "Unexpected code path! StakeAccount<()> \
-                                should not check if stake-state is a \
-                                Delegation."
-                            );
-                            return;
-                        }
-                    };
-                    if cached_stake_account != &stake_account {
-                        invalid_cached_stake_accounts.fetch_add(1, Relaxed);
-                    }
-                    let stake_delegation = (*stake_pubkey, stake_account);
+
                     let mut vote_delegations = if let Some(vote_delegations) =
                         vote_with_stake_delegations_map.get_mut(vote_pubkey)
                     {
                         vote_delegations
                     } else {
-                        let cached_vote_account = cached_vote_accounts.get(vote_pubkey);
                         let vote_account = match self.get_account_with_fixed_root(vote_pubkey) {
                             Some(vote_account) => {
-                                match cached_vote_account {
-                                    Some((_stake, cached_vote_account))
-                                        if cached_vote_account == &vote_account => {}
-                                    _ => {
-                                        invalid_cached_vote_accounts.fetch_add(1, Relaxed);
-                                    }
-                                };
                                 if vote_account.owner() != &solana_vote_program::id() {
                                     invalid_vote_keys
                                         .insert(*vote_pubkey, InvalidCacheEntryReason::WrongOwner);
@@ -2809,9 +2650,6 @@ impl Bank {
                                 vote_account
                             }
                             None => {
-                                if cached_vote_account.is_some() {
-                                    invalid_cached_vote_accounts.fetch_add(1, Relaxed);
-                                }
                                 invalid_vote_keys
                                     .insert(*vote_pubkey, InvalidCacheEntryReason::Missing);
                                 return;
@@ -2841,7 +2679,7 @@ impl Bank {
                         reward_calc_tracer(&RewardCalculationEvent::Staking(
                             stake_pubkey,
                             &InflationPointCalculationEvent::Delegation(
-                                delegation,
+                                *delegation,
                                 solana_vote_program::id(),
                             ),
                         ));
@@ -2850,132 +2688,11 @@ impl Bank {
                     vote_delegations.delegations.push(stake_delegation);
                 });
         });
-        invalid_cached_stake_accounts.fetch_add(invalid_stake_keys.len(), Relaxed);
+
         LoadVoteAndStakeAccountsResult {
             vote_with_stake_delegations_map,
             invalid_vote_keys,
             invalid_stake_keys,
-            invalid_cached_vote_accounts: invalid_cached_vote_accounts.into_inner(),
-            invalid_cached_stake_accounts: invalid_cached_stake_accounts.into_inner(),
-            vote_accounts_cache_miss_count: 0,
-        }
-    }
-
-    fn load_vote_and_stake_accounts<F>(
-        &self,
-        thread_pool: &ThreadPool,
-        reward_calc_tracer: Option<F>,
-    ) -> LoadVoteAndStakeAccountsResult
-    where
-        F: Fn(&RewardCalculationEvent) + Send + Sync,
-    {
-        let stakes = self.stakes_cache.stakes();
-        let stake_delegations: Vec<_> = stakes.stake_delegations().iter().collect();
-        // Obtain all unique voter pubkeys from stake delegations.
-        fn merge(mut acc: HashSet<Pubkey>, other: HashSet<Pubkey>) -> HashSet<Pubkey> {
-            if acc.len() < other.len() {
-                return merge(other, acc);
-            }
-            acc.extend(other);
-            acc
-        }
-        let voter_pubkeys = thread_pool.install(|| {
-            stake_delegations
-                .par_iter()
-                .fold(
-                    HashSet::default,
-                    |mut voter_pubkeys, (_stake_pubkey, stake_account)| {
-                        let delegation = stake_account.delegation();
-                        voter_pubkeys.insert(delegation.voter_pubkey);
-                        voter_pubkeys
-                    },
-                )
-                .reduce(HashSet::default, merge)
-        });
-        // Obtain vote-accounts for unique voter pubkeys.
-        let cached_vote_accounts = stakes.vote_accounts();
-        let solana_vote_program: Pubkey = solana_vote_program::id();
-        let vote_accounts_cache_miss_count = AtomicUsize::default();
-        let get_vote_account = |vote_pubkey: &Pubkey| -> Option<VoteAccount> {
-            if let Some((_stake, vote_account)) = cached_vote_accounts.get(vote_pubkey) {
-                return Some(vote_account.clone());
-            }
-            // If accounts-db contains a valid vote account, then it should
-            // already have been cached in cached_vote_accounts; so the code
-            // below is only for sanity check, and can be removed once
-            // vote_accounts_cache_miss_count is shown to be always zero.
-            let account = self.get_account_with_fixed_root(vote_pubkey)?;
-            if account.owner() == &solana_vote_program
-                && VoteState::deserialize(account.data()).is_ok()
-            {
-                vote_accounts_cache_miss_count.fetch_add(1, Relaxed);
-            }
-            Some(VoteAccount::from(account))
-        };
-        let invalid_vote_keys = DashMap::<Pubkey, InvalidCacheEntryReason>::new();
-        let make_vote_delegations_entry = |vote_pubkey| {
-            let vote_account = match get_vote_account(&vote_pubkey) {
-                Some(vote_account) => vote_account,
-                None => {
-                    invalid_vote_keys.insert(vote_pubkey, InvalidCacheEntryReason::Missing);
-                    return None;
-                }
-            };
-            if vote_account.owner() != &solana_vote_program {
-                invalid_vote_keys.insert(vote_pubkey, InvalidCacheEntryReason::WrongOwner);
-                return None;
-            }
-            let vote_state = match vote_account.vote_state().deref() {
-                Ok(vote_state) => vote_state.clone(),
-                Err(_) => {
-                    invalid_vote_keys.insert(vote_pubkey, InvalidCacheEntryReason::BadState);
-                    return None;
-                }
-            };
-            let vote_with_stake_delegations = VoteWithStakeDelegations {
-                vote_state: Arc::new(vote_state),
-                vote_account: AccountSharedData::from(vote_account),
-                delegations: Vec::default(),
-            };
-            Some((vote_pubkey, vote_with_stake_delegations))
-        };
-        let vote_with_stake_delegations_map: DashMap<Pubkey, VoteWithStakeDelegations> =
-            thread_pool.install(|| {
-                voter_pubkeys
-                    .into_par_iter()
-                    .filter_map(make_vote_delegations_entry)
-                    .collect()
-            });
-        // Join stake accounts with vote-accounts.
-        let push_stake_delegation = |(stake_pubkey, stake_account): (&Pubkey, &StakeAccount<_>)| {
-            let delegation = stake_account.delegation();
-            let mut vote_delegations =
-                match vote_with_stake_delegations_map.get_mut(&delegation.voter_pubkey) {
-                    Some(vote_delegations) => vote_delegations,
-                    None => return,
-                };
-            if let Some(reward_calc_tracer) = reward_calc_tracer.as_ref() {
-                let delegation =
-                    InflationPointCalculationEvent::Delegation(delegation, solana_vote_program);
-                let event = RewardCalculationEvent::Staking(stake_pubkey, &delegation);
-                reward_calc_tracer(&event);
-            }
-            let stake_account = StakeAccount::from(stake_account.clone());
-            let stake_delegation = (*stake_pubkey, stake_account);
-            vote_delegations.delegations.push(stake_delegation);
-        };
-        thread_pool.install(|| {
-            stake_delegations
-                .into_par_iter()
-                .for_each(push_stake_delegation);
-        });
-        LoadVoteAndStakeAccountsResult {
-            vote_with_stake_delegations_map,
-            invalid_vote_keys,
-            invalid_stake_keys: DashMap::default(),
-            invalid_cached_vote_accounts: 0,
-            invalid_cached_stake_accounts: 0,
-            vote_accounts_cache_miss_count: vote_accounts_cache_miss_count.into_inner(),
         }
     }
 
@@ -2986,10 +2703,9 @@ impl Bank {
         rewarded_epoch: Epoch,
         rewards: u64,
         reward_calc_tracer: Option<impl Fn(&RewardCalculationEvent) + Send + Sync>,
-        credits_auto_rewind: bool,
+        fix_activating_credits_observed: bool,
         thread_pool: &ThreadPool,
-        metrics: &mut RewardsMetrics,
-        update_rewards_from_cached_accounts: bool,
+        metrics: &RewardsMetrics,
     ) -> f64 {
         let stake_history = self.stakes_cache.stakes().history().clone();
         let vote_with_stake_delegations_map = {
@@ -2998,24 +2714,15 @@ impl Bank {
                 vote_with_stake_delegations_map,
                 invalid_stake_keys,
                 invalid_vote_keys,
-                invalid_cached_vote_accounts,
-                invalid_cached_stake_accounts,
-                vote_accounts_cache_miss_count,
-            } = if update_rewards_from_cached_accounts {
-                self.load_vote_and_stake_accounts(thread_pool, reward_calc_tracer.as_ref())
-            } else {
-                self.load_vote_and_stake_accounts_with_thread_pool(
-                    thread_pool,
-                    reward_calc_tracer.as_ref(),
-                )
-            };
+            } = self.load_vote_and_stake_accounts_with_thread_pool(
+                thread_pool,
+                reward_calc_tracer.as_ref(),
+            );
             m.stop();
             metrics
                 .load_vote_and_stake_accounts_us
                 .fetch_add(m.as_us(), Relaxed);
-            metrics.invalid_cached_vote_accounts += invalid_cached_vote_accounts;
-            metrics.invalid_cached_stake_accounts += invalid_cached_stake_accounts;
-            metrics.vote_accounts_cache_miss_count += vote_accounts_cache_miss_count;
+
             let evict_invalid_stakes_cache_entries = self
                 .feature_set
                 .is_active(&feature_set::evict_invalid_stakes_cache_entries::id());
@@ -3041,9 +2748,9 @@ impl Bank {
 
                     delegations
                         .par_iter()
-                        .map(|(_stake_pubkey, stake_account)| {
+                        .map(|(_stake_pubkey, (stake_state, _stake_account))| {
                             stake_state::calculate_points(
-                                stake_account.stake_state(),
+                                stake_state,
                                 vote_state,
                                 Some(&stake_history),
                             )
@@ -3084,62 +2791,66 @@ impl Bank {
         let mut m = Measure::start("redeem_rewards");
         let mut stake_rewards = thread_pool.install(|| {
             stake_delegation_iterator
-                .filter_map(|(vote_pubkey, vote_state, (stake_pubkey, stake_account))| {
-                    // curry closure to add the contextual stake_pubkey
-                    let reward_calc_tracer = reward_calc_tracer.as_ref().map(|outer| {
-                        // inner
-                        move |inner_event: &_| {
-                            outer(&RewardCalculationEvent::Staking(&stake_pubkey, inner_event))
-                        }
-                    });
-                    let (mut stake_account, stake_state) =
-                        <(AccountSharedData, StakeState)>::from(stake_account);
-                    let redeemed = stake_state::redeem_rewards(
-                        rewarded_epoch,
-                        stake_state,
-                        &mut stake_account,
-                        &vote_state,
-                        &point_value,
-                        Some(&stake_history),
-                        reward_calc_tracer.as_ref(),
-                        credits_auto_rewind,
-                    );
-                    if let Ok((stakers_reward, voters_reward)) = redeemed {
-                        // track voter rewards
-                        if let Some((
-                            _vote_account,
-                            _commission,
-                            vote_rewards_sum,
-                            vote_needs_store,
-                        )) = vote_account_rewards.get_mut(&vote_pubkey).as_deref_mut()
-                        {
-                            *vote_needs_store = true;
-                            *vote_rewards_sum = vote_rewards_sum.saturating_add(voters_reward);
-                        }
-
-                        // store stake account even if stakers_reward is 0
-                        // because credits observed has changed
-                        self.store_account(&stake_pubkey, &stake_account);
-
-                        if stakers_reward > 0 {
-                            return Some((
-                                stake_pubkey,
-                                RewardInfo {
-                                    reward_type: RewardType::Staking,
-                                    lamports: stakers_reward as i64,
-                                    post_balance: stake_account.lamports(),
-                                    commission: Some(vote_state.commission),
-                                },
-                            ));
-                        }
-                    } else {
-                        debug!(
-                            "stake_state::redeem_rewards() failed for {}: {:?}",
-                            stake_pubkey, redeemed
+                .filter_map(
+                    |(
+                        vote_pubkey,
+                        vote_state,
+                        (stake_pubkey, (stake_state, mut stake_account)),
+                    )| {
+                        // curry closure to add the contextual stake_pubkey
+                        let reward_calc_tracer = reward_calc_tracer.as_ref().map(|outer| {
+                            // inner
+                            move |inner_event: &_| {
+                                outer(&RewardCalculationEvent::Staking(&stake_pubkey, inner_event))
+                            }
+                        });
+                        let redeemed = stake_state::redeem_rewards(
+                            rewarded_epoch,
+                            stake_state,
+                            &mut stake_account,
+                            &vote_state,
+                            &point_value,
+                            Some(&stake_history),
+                            reward_calc_tracer.as_ref(),
+                            fix_activating_credits_observed,
                         );
-                    }
-                    None
-                })
+                        if let Ok((stakers_reward, voters_reward)) = redeemed {
+                            // track voter rewards
+                            if let Some((
+                                _vote_account,
+                                _commission,
+                                vote_rewards_sum,
+                                vote_needs_store,
+                            )) = vote_account_rewards.get_mut(&vote_pubkey).as_deref_mut()
+                            {
+                                *vote_needs_store = true;
+                                *vote_rewards_sum = vote_rewards_sum.saturating_add(voters_reward);
+                            }
+
+                            // store stake account even if stakers_reward is 0
+                            // because credits observed has changed
+                            self.store_account(&stake_pubkey, &stake_account);
+
+                            if stakers_reward > 0 {
+                                return Some((
+                                    stake_pubkey,
+                                    RewardInfo {
+                                        reward_type: RewardType::Staking,
+                                        lamports: stakers_reward as i64,
+                                        post_balance: stake_account.lamports(),
+                                        commission: Some(vote_state.commission),
+                                    },
+                                ));
+                            }
+                        } else {
+                            debug!(
+                                "stake_state::redeem_rewards() failed for {}: {:?}",
+                                stake_pubkey, redeemed
+                            );
+                        }
+                        None
+                    },
+                )
                 .collect()
         });
         m.stop();
@@ -3329,7 +3040,7 @@ impl Bank {
         let mut hash = self.hash.write().unwrap();
         if *hash == Hash::default() {
             // finish up any deferred changes to account state
-            self.collect_rent_eagerly(false);
+            self.collect_rent_eagerly();
             self.collect_fees();
             self.distribute_rent();
             self.update_slot_history();
@@ -3342,9 +3053,32 @@ impl Bank {
         }
     }
 
-    // dangerous; don't use this; this is only needed for ledger-tool's special command
-    pub fn unfreeze_for_ledger_tool(&self) {
-        self.freeze_started.store(false, Relaxed);
+    // Should not be called outside of startup, will race with
+    // concurrent cleaning logic in AccountsBackgroundService
+    pub fn exhaustively_free_unused_resource(&self, last_full_snapshot_slot: Option<Slot>) {
+        const IS_STARTUP: bool = true; // this is only called at startup, and we want to use more threads
+        let mut flush = Measure::start("flush");
+        // Flush all the rooted accounts. Must be called after `squash()`,
+        // so that AccountsDb knows what the roots are.
+        self.force_flush_accounts_cache();
+        flush.stop();
+
+        let mut clean = Measure::start("clean");
+        // Don't clean the slot we're snapshotting because it may have zero-lamport
+        // accounts that were included in the bank delta hash when the bank was frozen,
+        // and if we clean them here, any newly created snapshot's hash for this bank
+        // may not match the frozen hash.
+        self.clean_accounts(true, IS_STARTUP, last_full_snapshot_slot);
+        clean.stop();
+
+        let mut shrink = Measure::start("shrink");
+        self.shrink_all_slots(IS_STARTUP, last_full_snapshot_slot);
+        shrink.stop();
+
+        info!(
+            "exhaustively_free_unused_resource() {} {} {}",
+            flush, clean, shrink,
+        );
     }
 
     pub fn epoch_schedule(&self) -> &EpochSchedule {
@@ -3457,7 +3191,7 @@ impl Bank {
 
         self.rent_collector = RentCollector::new(
             self.epoch,
-            self.epoch_schedule(),
+            &self.epoch_schedule,
             self.slots_per_year,
             &genesis_config.rent,
         );
@@ -3593,7 +3327,7 @@ impl Bank {
 
     pub fn is_blockhash_valid(&self, hash: &Hash) -> bool {
         let blockhash_queue = self.blockhash_queue.read().unwrap();
-        blockhash_queue.is_hash_valid(hash)
+        blockhash_queue.check_hash(hash)
     }
 
     pub fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> u64 {
@@ -3656,7 +3390,7 @@ impl Bank {
         // length is made variable by epoch
         blockhash_queue
             .get_hash_age(blockhash)
-            .map(|age| self.slot + blockhash_queue.get_max_age() as u64 - age)
+            .map(|age| self.slot + blockhash_queue.len() as u64 - age)
     }
 
     pub fn get_blockhash_last_valid_block_height(&self, blockhash: &Hash) -> Option<Slot> {
@@ -3665,7 +3399,7 @@ impl Bank {
         // length is made variable by epoch
         blockhash_queue
             .get_hash_age(blockhash)
-            .map(|age| self.block_height + blockhash_queue.get_max_age() as u64 - age)
+            .map(|age| self.block_height + blockhash_queue.len() as u64 - age)
     }
 
     pub fn confirmed_last_blockhash(&self) -> Hash {
@@ -3723,18 +3457,6 @@ impl Bank {
         }
     }
 
-    /// Register a new recent blockhash in the bank's recent blockhash queue. Called when a bank
-    /// reaches its max tick height. Can be called by tests to get new blockhashes for transaction
-    /// processing without advancing to a new bank slot.
-    pub fn register_recent_blockhash(&self, blockhash: &Hash) {
-        // Only acquire the write lock for the blockhash queue on block boundaries because
-        // readers can starve this write lock acquisition and ticks would be slowed down too
-        // much if the write lock is acquired for each tick.
-        let mut w_blockhash_queue = self.blockhash_queue.write().unwrap();
-        w_blockhash_queue.register_hash(blockhash, self.fee_rate_governor.lamports_per_signature);
-        self.update_recent_blockhashes_locked(&w_blockhash_queue);
-    }
-
     /// Tell the bank which Entry IDs exist on the ledger. This function assumes subsequent calls
     /// correspond to later entries, and will boot the oldest ones once its internal cache is full.
     /// Once boot, the bank will reject transactions using that `hash`.
@@ -3749,7 +3471,12 @@ impl Bank {
 
         inc_new_counter_debug!("bank-register_tick-registered", 1);
         if self.is_block_boundary(self.tick_height.load(Relaxed) + 1) {
-            self.register_recent_blockhash(hash);
+            // Only acquire the write lock for the blockhash queue on block boundaries because
+            // readers can starve this write lock acquisition and ticks would be slowed down too
+            // much if the write lock is acquired for each tick.
+            let mut w_blockhash_queue = self.blockhash_queue.write().unwrap();
+            w_blockhash_queue.register_hash(hash, self.fee_rate_governor.lamports_per_signature);
+            self.update_recent_blockhashes_locked(&w_blockhash_queue);
         }
 
         // ReplayStage will start computing the accounts delta hash when it
@@ -3765,14 +3492,7 @@ impl Bank {
     }
 
     pub fn is_block_boundary(&self, tick_height: u64) -> bool {
-        if self
-            .feature_set
-            .is_active(&feature_set::fix_recent_blockhashes::id())
-        {
-            tick_height == self.max_tick_height
-        } else {
-            tick_height % self.ticks_per_slot == 0
-        }
+        tick_height % self.ticks_per_slot == 0
     }
 
     /// Prepare a transaction batch from a list of legacy transactions. Used for tests only.
@@ -3793,7 +3513,16 @@ impl Bank {
     pub fn prepare_entry_batch(&self, txs: Vec<VersionedTransaction>) -> Result<TransactionBatch> {
         let sanitized_txs = txs
             .into_iter()
-            .map(|tx| SanitizedTransaction::try_create(tx, MessageHash::Compute, None, self))
+            .map(|tx| {
+                SanitizedTransaction::try_create(
+                    tx,
+                    MessageHash::Compute,
+                    None,
+                    self,
+                    self.feature_set
+                        .is_active(&feature_set::require_static_program_ids_in_transaction::ID),
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let lock_results = self
             .rc
@@ -3880,7 +3609,6 @@ impl Bank {
             MAX_PROCESSING_AGE - MAX_TRANSACTION_FORWARDING_DELAY,
             false,
             true,
-            true,
             &mut timings,
             Some(&account_overrides),
         );
@@ -3912,20 +3640,17 @@ impl Bank {
 
         let execution_result = execution_results.pop().unwrap();
         let flattened_result = execution_result.flattened_result();
-        let (logs, return_data) = match execution_result {
-            TransactionExecutionResult::Executed { details, .. } => {
-                (details.log_messages, details.return_data)
-            }
-            TransactionExecutionResult::NotExecuted(_) => (None, None),
-        };
-        let logs = logs.unwrap_or_default();
+        let logs = match execution_result {
+            TransactionExecutionResult::Executed { details, .. } => details.log_messages,
+            TransactionExecutionResult::NotExecuted(_) => None,
+        }
+        .unwrap_or_default();
 
         TransactionSimulationResult {
             result: flattened_result,
             logs,
             post_simulation_accounts,
             units_consumed,
-            return_data,
         }
     }
 
@@ -3979,10 +3704,14 @@ impl Bank {
             .map(|(tx, lock_res)| match lock_res {
                 Ok(()) => {
                     let recent_blockhash = tx.message().recent_blockhash();
-                    if hash_queue.is_hash_valid_for_age(recent_blockhash, max_age) {
+                    let hash_age = hash_queue.check_hash_age(recent_blockhash, max_age);
+                    if hash_age == Some(true) {
                         (Ok(()), None)
                     } else if let Some((address, account)) = self.check_transaction_for_nonce(tx) {
                         (Ok(()), Some(NoncePartial::new(address, account)))
+                    } else if hash_age == Some(false) {
+                        error_counters.blockhash_too_old += 1;
+                        (Err(TransactionError::BlockhashNotFound), None)
                     } else {
                         error_counters.blockhash_not_found += 1;
                         (Err(TransactionError::BlockhashNotFound), None)
@@ -4028,15 +3757,11 @@ impl Bank {
             .collect()
     }
 
-    pub fn get_hash_age(&self, hash: &Hash) -> Option<u64> {
-        self.blockhash_queue.read().unwrap().get_hash_age(hash)
-    }
-
-    pub fn is_hash_valid_for_age(&self, hash: &Hash, max_age: usize) -> bool {
+    pub fn check_hash_age(&self, hash: &Hash, max_age: usize) -> Option<bool> {
         self.blockhash_queue
             .read()
             .unwrap()
-            .is_hash_valid_for_age(hash, max_age)
+            .check_hash_age(hash, max_age)
     }
 
     fn check_message_for_nonce(&self, message: &SanitizedMessage) -> Option<TransactionAccount> {
@@ -4141,7 +3866,6 @@ impl Bank {
 
     /// Execute a transaction using the provided loaded accounts and update
     /// the executors cache if the transaction was successful.
-    #[allow(clippy::too_many_arguments)]
     fn execute_loaded_transaction(
         &self,
         tx: &SanitizedTransaction,
@@ -4150,7 +3874,6 @@ impl Bank {
         durable_nonce_fee: Option<DurableNonceFee>,
         enable_cpi_recording: bool,
         enable_log_recording: bool,
-        enable_return_data_recording: bool,
         timings: &mut ExecuteTimings,
         error_counters: &mut TransactionErrorMetrics,
     ) -> TransactionExecutionResult {
@@ -4241,11 +3964,7 @@ impl Bank {
                     .ok()
             });
 
-        let ExecutionRecord {
-            accounts,
-            instruction_trace,
-            mut return_data,
-        } = transaction_context.into();
+        let (accounts, instruction_trace) = transaction_context.deconstruct();
         loaded_transaction.accounts = accounts;
 
         let inner_instructions = if enable_cpi_recording {
@@ -4256,26 +3975,12 @@ impl Bank {
             None
         };
 
-        let return_data = if enable_return_data_recording {
-            if let Some(end_index) = return_data.data.iter().rposition(|&x| x != 0) {
-                let end_index = end_index.saturating_add(1);
-                error!("end index {}", end_index);
-                return_data.data.truncate(end_index);
-                Some(return_data)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         TransactionExecutionResult::Executed {
             details: TransactionExecutionDetails {
                 status,
                 log_messages,
                 inner_instructions,
                 durable_nonce_fee,
-                return_data,
                 executed_units,
             },
             executors,
@@ -4289,7 +3994,6 @@ impl Bank {
         max_age: usize,
         enable_cpi_recording: bool,
         enable_log_recording: bool,
-        enable_return_data_recording: bool,
         timings: &mut ExecuteTimings,
         account_overrides: Option<&AccountOverrides>,
     ) -> LoadAndExecuteTransactionsOutput {
@@ -4392,7 +4096,6 @@ impl Bank {
                         nonce.as_ref().map(DurableNonceFee::from),
                         enable_cpi_recording,
                         enable_log_recording,
-                        enable_return_data_recording,
                         timings,
                         &mut error_counters,
                     )
@@ -4748,8 +4451,6 @@ impl Bank {
         );
         let rent_debits = self.collect_rent(&execution_results, loaded_txs);
 
-        // Cached vote and stake accounts are synchronized with accounts-db
-        // after each transaction.
         let mut update_stakes_cache_time = Measure::start("update_stakes_cache_time");
         self.update_stakes_cache(sanitized_txs, &execution_results, loaded_txs);
         update_stakes_cache_time.stop();
@@ -4814,7 +4515,7 @@ impl Bank {
     #[allow(clippy::needless_collect)]
     fn distribute_rent_to_validators(
         &self,
-        vote_accounts: &VoteAccountsHashMap,
+        vote_accounts: &HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>,
         rent_to_be_distributed: u64,
     ) {
         let mut total_staked = 0;
@@ -4981,12 +4682,7 @@ impl Bank {
         }
     }
 
-    /// after deserialize, populate rewrites with accounts that would normally have had their data rewritten in this slot due to rent collection (but didn't)
-    pub fn prepare_rewrites_for_hash(&self) {
-        self.collect_rent_eagerly(true);
-    }
-
-    fn collect_rent_eagerly(&self, just_rewrites: bool) {
+    fn collect_rent_eagerly(&self) {
         if self.lazy_rent_collection.load(Relaxed) {
             return;
         }
@@ -4996,18 +4692,13 @@ impl Bank {
         let count = partitions.len();
         let account_count: usize = partitions
             .into_iter()
-            .map(|partition| self.collect_rent_in_partition(partition, just_rewrites))
+            .map(|partition| self.collect_rent_in_partition(partition))
             .sum();
         measure.stop();
         datapoint_info!(
             "collect_rent_eagerly",
             ("accounts", account_count, i64),
-            ("partitions", count, i64),
-            (
-                "skipped_rewrites",
-                self.rewrites_skipped_this_slot.read().unwrap().len(),
-                i64
-            ),
+            ("partitions", count, i64)
         );
         inc_new_counter_info!("collect_rent_eagerly-ms", measure.as_ms() as usize);
     }
@@ -5037,13 +4728,7 @@ impl Bank {
         }
     }
 
-    /// load accounts with pubkeys in 'partition'
-    /// collect rent
-    /// store accounts, whether rent was collected or not
-    /// update bank's rewrites set for all rewrites that were skipped
-    /// if 'just_rewrites', function will only update bank's rewrites set and not actually store any accounts
-    /// return # accounts loaded
-    fn collect_rent_in_partition(&self, partition: Partition, just_rewrites: bool) -> usize {
+    fn collect_rent_in_partition(&self, partition: Partition) -> usize {
         let subrange = Self::pubkey_range_from_partition(partition);
 
         let thread_pool = &self.rc.accounts.accounts_db.thread_pool;
@@ -5060,43 +4745,21 @@ impl Bank {
         // parallelize?
         let mut rent_debits = RentDebits::default();
         let mut total_collected = CollectedInfo::default();
-        let bank_slot = self.slot();
-        let mut rewrites_skipped = Vec::with_capacity(accounts.len());
-        let can_skip_rewrites = self.rc.accounts.accounts_db.skip_rewrites || just_rewrites;
-        for (pubkey, mut account, loaded_slot) in accounts {
-            let old_rent_epoch = account.rent_epoch();
+        for (pubkey, mut account) in accounts {
             let collected = self.rent_collector.collect_from_existing_account(
                 &pubkey,
                 &mut account,
                 self.rc.accounts.accounts_db.filler_account_suffix.as_ref(),
             );
-            // only store accounts where we collected rent
-            // but get the hash for all these accounts even if collected rent is 0 (= not updated).
+            total_collected += collected;
+            // Store all of them unconditionally to purge old AppendVec,
+            // even if collected rent is 0 (= not updated).
             // Also, there's another subtle side-effect from this: this
             // ensures we verify the whole on-chain state (= all accounts)
-            // via the bank delta hash slowly once per an epoch.
-            if can_skip_rewrites
-                && Self::skip_rewrite(
-                    bank_slot,
-                    collected.rent_amount,
-                    loaded_slot,
-                    old_rent_epoch,
-                    &account,
-                )
-            {
-                // this would have been rewritten previously. Now we skip it.
-                // calculate the hash that we would have gotten if we did the rewrite.
-                // This will be needed to calculate the bank's hash.
-                let hash =
-                    crate::accounts_db::AccountsDb::hash_account(self.slot(), &account, &pubkey);
-                rewrites_skipped.push((pubkey, hash));
-            } else if !just_rewrites {
-                total_collected += collected;
-                self.store_account(&pubkey, &account);
-            }
+            // via the account delta hash slowly once per an epoch.
+            self.store_account(&pubkey, &account);
             rent_debits.insert(&pubkey, collected.rent_amount, account.lamports());
         }
-        self.remember_skipped_rewrites(rewrites_skipped);
         self.collected_rent
             .fetch_add(total_collected.rent_amount, Relaxed);
         self.rewards
@@ -5113,46 +4776,9 @@ impl Bank {
         account_count
     }
 
-    // put 'rewrites_skipped' into 'self.rewrites_skipped_this_slot'
-    fn remember_skipped_rewrites(&self, rewrites_skipped: Vec<(Pubkey, Hash)>) {
-        if !rewrites_skipped.is_empty() {
-            let mut rewrites_skipped_this_slot = self.rewrites_skipped_this_slot.write().unwrap();
-            rewrites_skipped.into_iter().for_each(|(pubkey, hash)| {
-                rewrites_skipped_this_slot.insert(pubkey, hash);
-            });
-        }
-    }
-
-    /// return true iff storing this account is just a rewrite and can be skipped
-    fn skip_rewrite(
-        bank_slot: Slot,
-        rent_amount: u64,
-        loaded_slot: Slot,
-        old_rent_epoch: Epoch,
-        account: &AccountSharedData,
-    ) -> bool {
-        if rent_amount != 0 || account.rent_epoch() == 0 {
-            // rent was != 0
-            // or special case for default rent value
-            // these cannot be skipped and must be written
-            return false;
-        }
-        if old_rent_epoch != account.rent_epoch() && loaded_slot == bank_slot {
-            // account's rent_epoch should increment even though we're not collecting rent.
-            // and we already wrote this account in this slot, but we did not adjust rent_epoch (sys vars for example)
-            // so, force ourselves to rewrite account if account was already written in this slot
-            // Now, the account that was written IN this slot, where normally we would have collected rent, has the corrent 'rent_epoch'.
-            // Only this last store will remain in the append vec.
-            // Otherwise, later code would assume the account was written successfully in this slot with the correct 'rent_epoch'.
-            return false;
-        }
-
-        // rent was 0 and no reason to rewrite, so THIS is a rewrite we can skip
-        true
-    }
-
     /// This is the inverse of pubkey_range_from_partition.
     /// return the lowest end_index which would contain this pubkey
+    #[cfg(test)]
     pub fn partition_from_pubkey(
         pubkey: &Pubkey,
         partition_count: PartitionsPerCycle,
@@ -5637,7 +5263,6 @@ impl Bank {
         collect_balances: bool,
         enable_cpi_recording: bool,
         enable_log_recording: bool,
-        enable_return_data_recording: bool,
         timings: &mut ExecuteTimings,
     ) -> (TransactionResults, TransactionBalancesSet) {
         let pre_balances = if collect_balances {
@@ -5658,7 +5283,6 @@ impl Bank {
             max_age,
             enable_cpi_recording,
             enable_log_recording,
-            enable_return_data_recording,
             timings,
             None,
         );
@@ -5688,25 +5312,6 @@ impl Bank {
     /// Bank::process_transactions method.
     pub fn process_transaction(&self, tx: &Transaction) -> Result<()> {
         self.try_process_transactions(std::iter::once(tx))?[0].clone()?;
-        tx.signatures
-            .get(0)
-            .map_or(Ok(()), |sig| self.get_signature_status(sig).unwrap())
-    }
-
-    /// Process a Transaction and store program log data. This is used for unit tests, and simply
-    /// replicates the vector Bank::process_transactions method with `enable_cpi_recording: true`
-    pub fn process_transaction_with_logs(&self, tx: &Transaction) -> Result<()> {
-        let txs = vec![VersionedTransaction::from(tx.clone())];
-        let batch = self.prepare_entry_batch(txs)?;
-        let _results = self.load_execute_and_commit_transactions(
-            &batch,
-            MAX_PROCESSING_AGE,
-            false,
-            false,
-            true,
-            false,
-            &mut ExecuteTimings::default(),
-        );
         tx.signatures
             .get(0)
             .map_or(Ok(()), |sig| self.get_signature_status(sig).unwrap())
@@ -5765,7 +5370,6 @@ impl Bank {
             false,
             false,
             false,
-            false,
             &mut ExecuteTimings::default(),
         )
         .0
@@ -5815,15 +5419,8 @@ impl Bank {
         self.rc
             .accounts
             .store_slow_cached(self.slot(), pubkey, account);
-        let mut m = Measure::start("stakes_cache.check_and_store");
+
         self.stakes_cache.check_and_store(pubkey, account);
-        m.stop();
-        self.rc
-            .accounts
-            .accounts_db
-            .stats
-            .stakes_cache_check_and_store_us
-            .fetch_add(m.as_us(), Relaxed);
     }
 
     pub fn force_flush_accounts_cache(&self) {
@@ -6025,22 +5622,7 @@ impl Bank {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        match self.rc.accounts.load_with_fixed_root(ancestors, pubkey) {
-            Some((mut account, storage_slot)) => {
-                ExpectedRentCollection::maybe_update_rent_epoch_on_load(
-                    &mut account,
-                    &SlotInfoInEpoch::new_small(storage_slot),
-                    &SlotInfoInEpoch::new_small(self.slot()),
-                    self.epoch_schedule(),
-                    self.rent_collector(),
-                    pubkey,
-                    &self.rewrites_skipped_this_slot,
-                );
-
-                Some((account, storage_slot))
-            }
-            None => None,
-        }
+        self.rc.accounts.load_with_fixed_root(ancestors, pubkey)
     }
 
     pub fn get_program_accounts(
@@ -6089,7 +5671,9 @@ impl Bank {
         self.rc.accounts.account_indexes_include_key(key)
     }
 
-    pub fn get_all_accounts_with_modified_slots(&self) -> ScanResult<Vec<PubkeyAccountSlot>> {
+    pub fn get_all_accounts_with_modified_slots(
+        &self,
+    ) -> ScanResult<Vec<(Pubkey, AccountSharedData, Slot)>> {
         self.rc.accounts.load_all(&self.ancestors, self.bank_id)
     }
 
@@ -6213,10 +5797,7 @@ impl Bank {
     ///  of the delta of the ledger since the last vote and up to now
     fn hash_internal_state(&self) -> Hash {
         // If there are no accounts, return the hash of the previous state and the latest blockhash
-        let accounts_delta_hash = self
-            .rc
-            .accounts
-            .bank_hash_info_at(self.slot(), &self.rewrites_skipped_this_slot);
+        let accounts_delta_hash = self.rc.accounts.bank_hash_info_at(self.slot());
         let mut signature_count_buf = [0u8; 8];
         LittleEndian::write_u64(&mut signature_count_buf[..], self.signature_count() as u64);
 
@@ -6259,19 +5840,12 @@ impl Bank {
     /// snapshot.
     /// Only called from startup or test code.
     #[must_use]
-    pub fn verify_bank_hash(
-        &self,
-        test_hash_calculation: bool,
-        can_cached_slot_be_unflushed: bool,
-    ) -> bool {
+    pub fn verify_bank_hash(&self, test_hash_calculation: bool) -> bool {
         self.rc.accounts.verify_bank_hash_and_lamports(
             self.slot(),
             &self.ancestors,
             self.capitalization(),
             test_hash_calculation,
-            self.epoch_schedule(),
-            &self.rent_collector,
-            can_cached_slot_be_unflushed,
         )
     }
 
@@ -6320,7 +5894,14 @@ impl Bank {
                 tx.message.hash()
             };
 
-            SanitizedTransaction::try_create(tx, message_hash, None, self)
+            SanitizedTransaction::try_create(
+                tx,
+                message_hash,
+                None,
+                self,
+                self.feature_set
+                    .is_active(&feature_set::require_static_program_ids_in_transaction::ID),
+            )
         }?;
 
         if verification_mode == TransactionVerificationMode::HashAndVerifyPrecompiles
@@ -6339,8 +5920,6 @@ impl Bank {
             self.slot(),
             can_cached_slot_be_unflushed,
             debug_verify,
-            self.epoch_schedule(),
-            &self.rent_collector,
         )
     }
 
@@ -6382,6 +5961,7 @@ impl Bank {
         mut debug_verify: bool,
         is_startup: bool,
     ) -> Hash {
+        let slots_per_epoch = Some(self.epoch_schedule().get_slots_in_epoch(self.epoch));
         let (hash, total_lamports) = self
             .rc
             .accounts
@@ -6393,8 +5973,7 @@ impl Bank {
                 &self.ancestors,
                 Some(self.capitalization()),
                 false,
-                self.epoch_schedule(),
-                &self.rent_collector,
+                slots_per_epoch,
                 is_startup,
             );
         if total_lamports != self.capitalization() {
@@ -6419,8 +5998,7 @@ impl Bank {
                         &self.ancestors,
                         Some(self.capitalization()),
                         false,
-                        self.epoch_schedule(),
-                        &self.rent_collector,
+                        slots_per_epoch,
                         is_startup,
                     );
             }
@@ -6454,6 +6032,11 @@ impl Bank {
         }
         clean_time.stop();
 
+        self.rc
+            .accounts
+            .accounts_db
+            .accounts_index
+            .set_startup(true);
         let mut shrink_all_slots_time = Measure::start("shrink_all_slots");
         if !accounts_db_skip_shrink && self.slot() > 0 {
             info!("shrinking..");
@@ -6463,8 +6046,13 @@ impl Bank {
 
         info!("verify_bank_hash..");
         let mut verify_time = Measure::start("verify_bank_hash");
-        let mut verify = self.verify_bank_hash(test_hash_calculation, false);
+        let mut verify = self.verify_bank_hash(test_hash_calculation);
         verify_time.stop();
+        self.rc
+            .accounts
+            .accounts_db
+            .accounts_index
+            .set_startup(false);
 
         info!("verify_hash..");
         let mut verify2_time = Measure::start("verify_hash");
@@ -6508,8 +6096,8 @@ impl Bank {
         *self.inflation.read().unwrap()
     }
 
-    pub fn rent_collector(&self) -> &RentCollector {
-        &self.rent_collector
+    pub fn rent_collector(&self) -> RentCollector {
+        self.rent_collector.clone()
     }
 
     /// Return the total capitalization of the Bank
@@ -6529,13 +6117,13 @@ impl Bank {
 
     /// Return the number of slots per epoch for the given epoch
     pub fn get_slots_in_epoch(&self, epoch: Epoch) -> u64 {
-        self.epoch_schedule().get_slots_in_epoch(epoch)
+        self.epoch_schedule.get_slots_in_epoch(epoch)
     }
 
     /// returns the epoch for which this bank's leader_schedule_slot_offset and slot would
     ///  need to cache leader_schedule
     pub fn get_leader_schedule_epoch(&self, slot: Slot) -> Epoch {
-        self.epoch_schedule().get_leader_schedule_epoch(slot)
+        self.epoch_schedule.get_leader_schedule_epoch(slot)
     }
 
     /// a bank-level cache of vote accounts and stake delegation info
@@ -6550,8 +6138,6 @@ impl Bank {
                 load_result,
                 execution_results[i].was_executed_successfully(),
             ) {
-                // note that this could get timed to: self.rc.accounts.accounts_db.stats.stakes_cache_check_and_store_us,
-                //  but this code path is captured separately in ExecuteTimingType::UpdateStakesCacheUs
                 let message = tx.message();
                 for (_i, (pubkey, account)) in
                     (0..message.account_keys().len()).zip(loaded_transaction.accounts.iter())
@@ -6568,7 +6154,7 @@ impl Bank {
 
     /// current vote accounts for this bank along with the stake
     ///   attributed to each account
-    pub fn vote_accounts(&self) -> Arc<VoteAccountsHashMap> {
+    pub fn vote_accounts(&self) -> Arc<HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>> {
         let stakes = self.stakes_cache.stakes();
         Arc::from(stakes.vote_accounts())
     }
@@ -6594,7 +6180,10 @@ impl Bank {
 
     /// vote accounts for the specific epoch along with the stake
     ///   attributed to each account
-    pub fn epoch_vote_accounts(&self, epoch: Epoch) -> Option<&VoteAccountsHashMap> {
+    pub fn epoch_vote_accounts(
+        &self,
+        epoch: Epoch,
+    ) -> Option<&HashMap<Pubkey, (u64, VoteAccount)>> {
         let epoch_stakes = self.epoch_stakes.get(&epoch)?.stakes();
         Some(epoch_stakes.vote_accounts().as_ref())
     }
@@ -6643,7 +6232,7 @@ impl Bank {
     ///  ( slot/slots_per_epoch, slot % slots_per_epoch )
     ///
     pub fn get_epoch_and_slot_index(&self, slot: Slot) -> (Epoch, SlotIndex) {
-        self.epoch_schedule().get_epoch_and_slot_index(slot)
+        self.epoch_schedule.get_epoch_and_slot_index(slot)
     }
 
     pub fn get_epoch_info(&self) -> EpochInfo {
@@ -6783,9 +6372,9 @@ impl Bank {
             .is_active(&feature_set::versioned_tx_message_enabled::id())
     }
 
-    pub fn credits_auto_rewind(&self) -> bool {
+    pub fn stake_program_advance_activating_credits_observed(&self) -> bool {
         self.feature_set
-            .is_active(&feature_set::credits_auto_rewind::id())
+            .is_active(&feature_set::stake_program_advance_activating_credits_observed::id())
     }
 
     pub fn leave_nonce_on_success(&self) -> bool {
@@ -6830,14 +6419,17 @@ impl Bank {
         self.feature_set = Arc::new(feature_set);
     }
 
-    pub fn fill_bank_with_ticks_for_tests(&self) {
-        if self.tick_height.load(Relaxed) < self.max_tick_height {
+    pub fn fill_bank_with_ticks(&self) {
+        let parent_distance = if self.slot() == 0 {
+            1
+        } else {
+            self.slot() - self.parent_slot()
+        };
+        for _ in 0..parent_distance {
             let last_blockhash = self.last_blockhash();
             while self.last_blockhash() == last_blockhash {
                 self.register_tick(&Hash::new_unique())
             }
-        } else {
-            warn!("Bank already reached max tick height, cannot fill it with more ticks");
         }
     }
 
@@ -7158,24 +6750,19 @@ impl Drop for Bank {
             // Default case for tests
             self.rc
                 .accounts
-                .accounts_db
                 .purge_slot(self.slot(), self.bank_id(), false);
         }
     }
 }
 
-/// utility function used for testing and benchmarking.
-pub mod test_utils {
-    use {super::Bank, solana_sdk::hash::hashv};
-    pub fn goto_end_of_slot(bank: &mut Bank) {
-        let mut tick_hash = bank.last_blockhash();
-        loop {
-            tick_hash = hashv(&[tick_hash.as_ref(), &[42]]);
-            bank.register_tick(&tick_hash);
-            if tick_hash == bank.last_blockhash() {
-                bank.freeze();
-                return;
-            }
+pub fn goto_end_of_slot(bank: &mut Bank) {
+    let mut tick_hash = bank.last_blockhash();
+    loop {
+        tick_hash = hashv(&[tick_hash.as_ref(), &[42]]);
+        bank.register_tick(&tick_hash);
+        if tick_hash == bank.last_blockhash() {
+            bank.freeze();
+            return;
         }
     }
 }
@@ -7204,7 +6791,7 @@ pub(crate) mod tests {
         solana_sdk::{
             account::Account,
             bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
-            clock::{DEFAULT_SLOTS_PER_EPOCH, DEFAULT_TICKS_PER_SLOT, MAX_RECENT_BLOCKHASHES},
+            clock::{DEFAULT_SLOTS_PER_EPOCH, DEFAULT_TICKS_PER_SLOT},
             compute_budget::ComputeBudgetInstruction,
             epoch_schedule::MINIMUM_SLOTS_PER_EPOCH,
             feature::Feature,
@@ -7215,7 +6802,6 @@ pub(crate) mod tests {
             message::{Message, MessageHeader},
             nonce,
             poh_config::PohConfig,
-            program::MAX_RETURN_DATA,
             rent::Rent,
             signature::{keypair_from_seed, Keypair, Signer},
             stake::{
@@ -7224,6 +6810,7 @@ pub(crate) mod tests {
             },
             system_instruction::{self, SystemError},
             system_program,
+            sysvar::rewards::Rewards,
             timing::duration_as_s,
             transaction::MAX_TX_ACCOUNT_LOCKS,
             transaction_context::InstructionContext,
@@ -7236,7 +6823,6 @@ pub(crate) mod tests {
             },
         },
         std::{result, thread::Builder, time::Duration},
-        test_utils::goto_end_of_slot,
     };
 
     fn new_sanitized_message(
@@ -7256,7 +6842,6 @@ pub(crate) mod tests {
                 log_messages: None,
                 inner_instructions: None,
                 durable_nonce_fee: nonce.map(DurableNonceFee::from),
-                return_data: None,
                 executed_units: 0u64,
             },
             executors: Rc::new(RefCell::new(Executors::default())),
@@ -7535,6 +7120,11 @@ pub(crate) mod tests {
     fn bank1_sysvar_delta() -> u64 {
         const SLOT_HASHES_SYSVAR_MIN_BALANCE: u64 = 143_487_360;
         SLOT_HASHES_SYSVAR_MIN_BALANCE
+    }
+
+    fn new_epoch_sysvar_delta() -> u64 {
+        const REWARDS_SYSVAR_MIN_BALANCE: u64 = 1_002_240;
+        REWARDS_SYSVAR_MIN_BALANCE
     }
 
     #[test]
@@ -8223,12 +7813,12 @@ pub(crate) mod tests {
 
         fn mock_process_instruction(
             _first_instruction_account: usize,
+            data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> result::Result<(), InstructionError> {
             let transaction_context = &invoke_context.transaction_context;
             let instruction_context = transaction_context.get_current_instruction_context()?;
-            let instruction_data = instruction_context.get_instruction_data();
-            if let Ok(instruction) = bincode::deserialize(instruction_data) {
+            if let Ok(instruction) = bincode::deserialize(data) {
                 match instruction {
                     MockInstruction::Deduction => {
                         instruction_context
@@ -9146,31 +8736,7 @@ pub(crate) mod tests {
             vec![genesis_slot]
         );
 
-        assert_eq!(bank.collected_rent.load(Relaxed), 0);
-        assert!(bank.rewrites_skipped_this_slot.read().unwrap().is_empty());
-        bank.collect_rent_in_partition((0, 0, 1), true);
-        {
-            let rewrites_skipped = bank.rewrites_skipped_this_slot.read().unwrap();
-            // `rewrites_skipped.len()` is the number of non-rent paying accounts in the slot. This
-            // is always at least the number of features in the Bank, due to
-            // `activate_all_features`. These accounts will stop being written to the append vec
-            // when we start skipping rewrites.
-            // 'collect_rent_in_partition' fills 'rewrites_skipped_this_slot' with rewrites that
-            // were skipped during rent collection but should still be considered in the slot's
-            // bank hash. If the slot is also written in the append vec, then the bank hash calc
-            // code ignores the contents of this list. This assert is confirming that the expected #
-            // of accounts were included in 'rewrites_skipped' by the call to
-            // 'collect_rent_in_partition(..., true)' above.
-            let num_features = bank.feature_set.inactive.len() + bank.feature_set.active.len();
-            assert!(rewrites_skipped.len() >= num_features);
-            // should have skipped 'rent_exempt_pubkey'
-            assert!(rewrites_skipped.contains_key(&rent_exempt_pubkey));
-            // should NOT have skipped 'rent_exempt_pubkey'
-            assert!(!rewrites_skipped.contains_key(&rent_due_pubkey));
-        }
-
-        assert_eq!(bank.collected_rent.load(Relaxed), 0);
-        bank.collect_rent_in_partition((0, 0, 1), false); // all range
+        bank.collect_rent_in_partition((0, 0, 1)); // all range
 
         assert_eq!(bank.collected_rent.load(Relaxed), rent_collected);
         assert_eq!(
@@ -9253,8 +8819,8 @@ pub(crate) mod tests {
         assert_eq!(hash1_with_zero, hash1_without_zero);
         assert_ne!(hash1_with_zero, Hash::default());
 
-        bank2_with_zero.collect_rent_in_partition((0, 0, 1), false); // all
-        bank2_without_zero.collect_rent_in_partition((0, 0, 1), false); // all
+        bank2_with_zero.collect_rent_in_partition((0, 0, 1)); // all
+        bank2_without_zero.collect_rent_in_partition((0, 0, 1)); // all
 
         bank2_with_zero.freeze();
         let hash2_with_zero = bank2_with_zero.hash();
@@ -9267,19 +8833,6 @@ pub(crate) mod tests {
 
     #[test]
     fn test_bank_update_vote_stake_rewards() {
-        let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        check_bank_update_vote_stake_rewards(|bank: &Bank| {
-            bank.load_vote_and_stake_accounts_with_thread_pool(&thread_pool, null_tracer())
-        });
-        check_bank_update_vote_stake_rewards(|bank: &Bank| {
-            bank.load_vote_and_stake_accounts(&thread_pool, null_tracer())
-        });
-    }
-
-    fn check_bank_update_vote_stake_rewards<F>(load_vote_and_stake_accounts: F)
-    where
-        F: Fn(&Bank) -> LoadVoteAndStakeAccountsResult,
-    {
         solana_logger::setup();
 
         // create a bank that ticks really slowly...
@@ -9351,7 +8904,30 @@ pub(crate) mod tests {
         );
         assert!(bank0.rewards.read().unwrap().is_empty());
 
-        load_vote_and_stake_accounts(&bank0);
+        let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let validator_points: u128 = bank0
+            .load_vote_and_stake_accounts_with_thread_pool(&thread_pool, null_tracer())
+            .vote_with_stake_delegations_map
+            .into_iter()
+            .map(
+                |(
+                    _vote_pubkey,
+                    VoteWithStakeDelegations {
+                        vote_state,
+                        delegations,
+                        ..
+                    },
+                )| {
+                    delegations
+                        .iter()
+                        .map(move |(_stake_pubkey, (stake_state, _stake_account))| {
+                            stake_state::calculate_points(stake_state, &vote_state, None)
+                                .unwrap_or(0)
+                        })
+                        .sum::<u128>()
+                },
+            )
+            .sum();
 
         // put a child bank in epoch 1, which calls update_rewards()...
         let bank1 = Bank::new_from_parent(
@@ -9362,25 +8938,29 @@ pub(crate) mod tests {
         // verify that there's inflation
         assert_ne!(bank1.capitalization(), bank0.capitalization());
 
-        // verify the inflation is represented in validator_points
-        let paid_rewards = bank1.capitalization() - bank0.capitalization() - bank1_sysvar_delta();
+        // verify the inflation is represented in validator_points *
+        let paid_rewards = bank1.capitalization()
+            - bank0.capitalization()
+            - bank1_sysvar_delta()
+            - new_epoch_sysvar_delta();
 
-        // this assumes that no new builtins or precompiles were activated in bank1
-        let PrevEpochInflationRewards {
-            validator_rewards, ..
-        } = bank1.calculate_previous_epoch_inflation_rewards(bank0.capitalization(), bank0.epoch());
+        let rewards = bank1
+            .get_account(&sysvar::rewards::id())
+            .map(|account| from_account::<Rewards, _>(&account).unwrap())
+            .unwrap();
 
         // verify the stake and vote accounts are the right size
         assert!(
             ((bank1.get_balance(&stake_id) - stake_account.lamports() + bank1.get_balance(&vote_id)
                 - vote_account.lamports()) as f64
-                - validator_rewards as f64)
+                - rewards.validator_point_value * validator_points as f64)
                 .abs()
                 < 1.0
         );
 
         // verify the rewards are the right size
-        assert!((validator_rewards as f64 - paid_rewards as f64).abs() < 1.0); // rounding, truncating
+        let allocated_rewards = rewards.validator_point_value * validator_points as f64;
+        assert!((allocated_rewards - paid_rewards as f64).abs() < 1.0); // rounding, truncating
 
         // verify validator rewards show up in bank1.rewards vector
         assert_eq!(
@@ -9389,7 +8969,7 @@ pub(crate) mod tests {
                 stake_id,
                 RewardInfo {
                     reward_type: RewardType::Staking,
-                    lamports: validator_rewards as i64,
+                    lamports: (rewards.validator_point_value * validator_points as f64) as i64,
                     post_balance: bank1.get_balance(&stake_id),
                     commission: Some(0),
                 }
@@ -9555,17 +9135,17 @@ pub(crate) mod tests {
         assert_eq!(bank0.get_account(&keypair.pubkey()).unwrap().lamports(), 10);
         assert_eq!(bank1.get_account(&keypair.pubkey()), None);
 
-        assert!(bank0.verify_bank_hash(true, false));
+        assert!(bank0.verify_bank_hash(true));
 
         // Squash and then verify hash_internal value
         bank0.freeze();
         bank0.squash();
-        assert!(bank0.verify_bank_hash(true, false));
+        assert!(bank0.verify_bank_hash(true));
 
         bank1.freeze();
         bank1.squash();
         bank1.update_accounts_hash();
-        assert!(bank1.verify_bank_hash(true, false));
+        assert!(bank1.verify_bank_hash(true));
 
         // keypair should have 0 tokens on both forks
         assert_eq!(bank0.get_account(&keypair.pubkey()), None);
@@ -9573,7 +9153,7 @@ pub(crate) mod tests {
         bank1.force_flush_accounts_cache();
         bank1.clean_accounts(false, false, None);
 
-        assert!(bank1.verify_bank_hash(true, false));
+        assert!(bank1.verify_bank_hash(true));
     }
 
     #[test]
@@ -10401,7 +9981,6 @@ pub(crate) mod tests {
                 false,
                 false,
                 false,
-                false,
                 &mut ExecuteTimings::default(),
             )
             .0
@@ -10631,7 +10210,7 @@ pub(crate) mod tests {
         info!("transfer 2 {}", pubkey2);
         bank2.transfer(10, &mint_keypair, &pubkey2).unwrap();
         bank2.update_accounts_hash();
-        assert!(bank2.verify_bank_hash(true, false));
+        assert!(bank2.verify_bank_hash(true));
     }
 
     #[test]
@@ -10655,19 +10234,19 @@ pub(crate) mod tests {
         // Checkpointing should never modify the checkpoint's state once frozen
         let bank0_state = bank0.hash_internal_state();
         bank2.update_accounts_hash();
-        assert!(bank2.verify_bank_hash(true, false));
+        assert!(bank2.verify_bank_hash(true));
         let bank3 = Bank::new_from_parent(&bank0, &solana_sdk::pubkey::new_rand(), 2);
         assert_eq!(bank0_state, bank0.hash_internal_state());
-        assert!(bank2.verify_bank_hash(true, false));
+        assert!(bank2.verify_bank_hash(true));
         bank3.update_accounts_hash();
-        assert!(bank3.verify_bank_hash(true, false));
+        assert!(bank3.verify_bank_hash(true));
 
         let pubkey2 = solana_sdk::pubkey::new_rand();
         info!("transfer 2 {}", pubkey2);
         bank2.transfer(10, &mint_keypair, &pubkey2).unwrap();
         bank2.update_accounts_hash();
-        assert!(bank2.verify_bank_hash(true, false));
-        assert!(bank3.verify_bank_hash(true, false));
+        assert!(bank2.verify_bank_hash(true));
+        assert!(bank3.verify_bank_hash(true));
     }
 
     #[test]
@@ -11363,32 +10942,15 @@ pub(crate) mod tests {
     #[test]
     fn test_bank_cloned_stake_delegations() {
         let GenesisConfigInfo {
-            mut genesis_config,
+            genesis_config,
             mint_keypair,
             ..
-        } = create_genesis_config_with_leader(
-            123_456_000_000_000,
-            &solana_sdk::pubkey::new_rand(),
-            123_000_000_000,
-        );
-        genesis_config.rent = Rent::default();
+        } = create_genesis_config_with_leader(500, &solana_sdk::pubkey::new_rand(), 1);
         let bank = Arc::new(Bank::new_for_tests(&genesis_config));
 
         let stake_delegations = bank.stakes_cache.stakes().stake_delegations().clone();
         assert_eq!(stake_delegations.len(), 1); // bootstrap validator has
                                                 // to have a stake delegation
-
-        let (vote_balance, stake_balance) = {
-            let rent = &bank.rent_collector().rent;
-            let vote_rent_exempt_reserve = rent.minimum_balance(VoteState::size_of());
-            let stake_rent_exempt_reserve = rent.minimum_balance(StakeState::size_of());
-            let minimum_delegation =
-                solana_stake_program::get_minimum_delegation(&bank.feature_set);
-            (
-                vote_rent_exempt_reserve,
-                stake_rent_exempt_reserve + minimum_delegation,
-            )
-        };
 
         let vote_keypair = Keypair::new();
         let mut instructions = vote_instruction::create_account(
@@ -11400,7 +10962,7 @@ pub(crate) mod tests {
                 authorized_withdrawer: vote_keypair.pubkey(),
                 commission: 0,
             },
-            vote_balance,
+            10,
         );
 
         let stake_keypair = Keypair::new();
@@ -11410,7 +10972,7 @@ pub(crate) mod tests {
             &vote_keypair.pubkey(),
             &Authorized::auto(&stake_keypair.pubkey()),
             &Lockup::default(),
-            stake_balance,
+            10,
         ));
 
         let message = Message::new(&instructions, Some(&mint_keypair.pubkey()));
@@ -11690,6 +11252,7 @@ pub(crate) mod tests {
         }
         fn mock_vote_processor(
             _first_instruction_account: usize,
+            _instruction_data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             let transaction_context = &invoke_context.transaction_context;
@@ -11749,6 +11312,7 @@ pub(crate) mod tests {
 
         fn mock_vote_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             _invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             Err(InstructionError::Custom(42))
@@ -11798,6 +11362,7 @@ pub(crate) mod tests {
 
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             _invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             Err(InstructionError::Custom(42))
@@ -11879,7 +11444,7 @@ pub(crate) mod tests {
             assert_eq!(recent_blockhashes.len(), i);
             let most_recent_hash = recent_blockhashes.iter().next().unwrap().blockhash;
             // Check order
-            assert!(bank.is_hash_valid_for_age(&most_recent_hash, 0));
+            assert_eq!(Some(true), bank.check_hash_age(&most_recent_hash, 0));
             goto_end_of_slot(Arc::get_mut(&mut bank).unwrap());
             bank = Arc::new(new_from_parent(&bank));
         }
@@ -12949,7 +12514,6 @@ pub(crate) mod tests {
                 true,
                 false,
                 false,
-                false,
                 &mut ExecuteTimings::default(),
             );
 
@@ -12995,12 +12559,12 @@ pub(crate) mod tests {
 
         fn mock_process_instruction(
             _first_instruction_account: usize,
+            data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> result::Result<(), InstructionError> {
             let transaction_context = &invoke_context.transaction_context;
             let instruction_context = transaction_context.get_current_instruction_context()?;
-            let instruction_data = instruction_context.get_instruction_data();
-            let lamports = instruction_data[0] as u64;
+            let lamports = data[0] as u64;
             instruction_context
                 .try_borrow_instruction_account(transaction_context, 2)?
                 .checked_sub_lamports(lamports)?;
@@ -13054,6 +12618,7 @@ pub(crate) mod tests {
         #[allow(clippy::unnecessary_wraps)]
         fn mock_process_instruction(
             _first_instruction_account: usize,
+            _data: &[u8],
             _invoke_context: &mut InvokeContext,
         ) -> result::Result<(), InstructionError> {
             Ok(())
@@ -13276,6 +12841,7 @@ pub(crate) mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn mock_ok_vote_processor(
         _first_instruction_account: usize,
+        _data: &[u8],
         _invoke_context: &mut InvokeContext,
     ) -> std::result::Result<(), InstructionError> {
         Ok(())
@@ -13501,19 +13067,19 @@ pub(crate) mod tests {
             if bank.slot == 32 {
                 assert_eq!(
                     bank.hash().to_string(),
-                    "AxphC8xDj9gmFosor5gyiovNvPVMydJCFRUTxn2wFiQf"
+                    "7qCbZN5WLT928VpsaLwLp6HfRDzZirmoU4JM4XBEyupu"
                 );
             }
             if bank.slot == 64 {
                 assert_eq!(
                     bank.hash().to_string(),
-                    "4vZCSbBuL8xjE43rCy9Cm3dCh1BMj45heMiMb6n6qgzA"
+                    "D3ypfQFreDaQhJuuYN8rWG1TVy9ApvTCx5CAiQ5i9d7A"
                 );
             }
             if bank.slot == 128 {
                 assert_eq!(
                     bank.hash().to_string(),
-                    "46LUpeBdJuisnfwgYisvh4x7jnxzBaLfHF614GtcTs59"
+                    "67krqDMqjkkixdfypnCCgSyUm2FoqAE8KB1hgRAtCaBp"
                 );
                 break;
             }
@@ -13525,6 +13091,7 @@ pub(crate) mod tests {
     fn test_same_program_id_uses_unqiue_executable_accounts() {
         fn nested_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> result::Result<(), InstructionError> {
             let transaction_context = &invoke_context.transaction_context;
@@ -13799,6 +13366,7 @@ pub(crate) mod tests {
         #[allow(clippy::unnecessary_wraps)]
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             _invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             Ok(())
@@ -13837,6 +13405,7 @@ pub(crate) mod tests {
         #[allow(clippy::unnecessary_wraps)]
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             _context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             Ok(())
@@ -14214,10 +13783,11 @@ pub(crate) mod tests {
     #[derive(Debug)]
     struct TestExecutor {}
     impl Executor for TestExecutor {
-        fn execute(
+        fn execute<'a, 'b>(
             &self,
             _first_instruction_account: usize,
-            _invoke_context: &mut InvokeContext,
+            _instruction_data: &[u8],
+            _invoke_context: &'a mut InvokeContext<'b>,
         ) -> std::result::Result<(), InstructionError> {
             Ok(())
         }
@@ -15048,9 +14618,7 @@ pub(crate) mod tests {
         // Let threads run for a while, check the scans didn't see any mixed slots
         let min_expected_number_of_scans = 5;
         std::thread::sleep(Duration::new(5, 0));
-        // This can be reduced when you are running this test locally to deal with hangs
-        // But, if it is too low, the ci fails intermittently.
-        let mut remaining_loops = 2000;
+        let mut remaining_loops = 1000;
         loop {
             if num_banks_scanned.load(Relaxed) > min_expected_number_of_scans {
                 break;
@@ -15157,7 +14725,9 @@ pub(crate) mod tests {
                         current_major_fork_bank.clean_accounts(false, false, None);
                         // Move purge here so that Bank::drop()->purge_slots() doesn't race
                         // with clean. Simulates the call from AccountsBackgroundService
-                        abs_request_handler.handle_pruned_banks(&current_major_fork_bank, true);
+                        let is_abs_service = true;
+                        abs_request_handler
+                            .handle_pruned_banks(&current_major_fork_bank, is_abs_service);
                     }
                 },
                 Some(Box::new(SendDroppedBankCallback::new(
@@ -15704,28 +15274,6 @@ pub(crate) mod tests {
 
     #[test]
     fn test_stake_vote_account_validity() {
-        let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        check_stake_vote_account_validity(
-            true, // check owner change,
-            |bank: &Bank| {
-                bank.load_vote_and_stake_accounts_with_thread_pool(&thread_pool, null_tracer())
-            },
-        );
-        // TODO: stakes cache should be hardened for the case when the account
-        // owner is changed from vote/stake program to something else. see:
-        // https://github.com/solana-labs/solana/pull/24200#discussion_r849935444
-        check_stake_vote_account_validity(
-            false, // check owner change
-            |bank: &Bank| bank.load_vote_and_stake_accounts(&thread_pool, null_tracer()),
-        );
-    }
-
-    fn check_stake_vote_account_validity<F>(
-        check_owner_change: bool,
-        load_vote_and_stake_accounts: F,
-    ) where
-        F: Fn(&Bank) -> LoadVoteAndStakeAccountsResult,
-    {
         let validator_vote_keypairs0 = ValidatorVoteKeypairs::new_rand();
         let validator_vote_keypairs1 = ValidatorVoteKeypairs::new_rand();
         let validator_keypairs = vec![&validator_vote_keypairs0, &validator_vote_keypairs1];
@@ -15735,8 +15283,10 @@ pub(crate) mod tests {
             vec![10_000; 2],
         );
         let bank = Arc::new(Bank::new_for_tests(&genesis_config));
-        let vote_and_stake_accounts =
-            load_vote_and_stake_accounts(&bank).vote_with_stake_delegations_map;
+        let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let vote_and_stake_accounts = bank
+            .load_vote_and_stake_accounts_with_thread_pool(&thread_pool, null_tracer())
+            .vote_with_stake_delegations_map;
         assert_eq!(vote_and_stake_accounts.len(), 2);
 
         let mut vote_account = bank
@@ -15775,12 +15325,11 @@ pub(crate) mod tests {
         );
 
         // Accounts must be valid stake and vote accounts
-        let vote_and_stake_accounts =
-            load_vote_and_stake_accounts(&bank).vote_with_stake_delegations_map;
-        assert_eq!(
-            vote_and_stake_accounts.len(),
-            if check_owner_change { 0 } else { 1 }
-        );
+        let thread_pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let vote_and_stake_accounts = bank
+            .load_vote_and_stake_accounts_with_thread_pool(&thread_pool, null_tracer())
+            .vote_with_stake_delegations_map;
+        assert_eq!(vote_and_stake_accounts.len(), 0);
     }
 
     #[test]
@@ -15893,7 +15442,6 @@ pub(crate) mod tests {
                 false,
                 false,
                 true,
-                false,
                 &mut ExecuteTimings::default(),
             )
             .0
@@ -15934,92 +15482,6 @@ pub(crate) mod tests {
         assert!(failure_log_info.result.is_err());
         let failure_log = failure_log_info.log_messages.clone().pop().unwrap();
         assert!(failure_log.contains(&"failed".to_string()));
-    }
-
-    #[test]
-    fn test_tx_return_data() {
-        solana_logger::setup();
-        let GenesisConfigInfo {
-            genesis_config,
-            mint_keypair,
-            ..
-        } = create_genesis_config_with_leader(
-            1_000_000_000_000_000,
-            &Pubkey::new_unique(),
-            bootstrap_validator_stake_lamports(),
-        );
-        let mut bank = Bank::new_for_tests(&genesis_config);
-
-        let mock_program_id = Pubkey::new(&[2u8; 32]);
-        fn mock_process_instruction(
-            _first_instruction_account: usize,
-            invoke_context: &mut InvokeContext,
-        ) -> result::Result<(), InstructionError> {
-            let mock_program_id = Pubkey::new(&[2u8; 32]);
-            let transaction_context = &mut invoke_context.transaction_context;
-            let instruction_context = transaction_context.get_current_instruction_context()?;
-            let instruction_data = instruction_context.get_instruction_data();
-            let mut return_data = [0u8; MAX_RETURN_DATA];
-            if !instruction_data.is_empty() {
-                let index = usize::from_le_bytes(instruction_data.try_into().unwrap());
-                return_data[index] = 1;
-                transaction_context
-                    .set_return_data(mock_program_id, return_data.to_vec())
-                    .unwrap();
-            }
-            Ok(())
-        }
-        let blockhash = bank.last_blockhash();
-        bank.add_builtin("mock_program", &mock_program_id, mock_process_instruction);
-
-        for index in [
-            None,
-            Some(0),
-            Some(MAX_RETURN_DATA / 2),
-            Some(MAX_RETURN_DATA - 1),
-        ] {
-            let data = if let Some(index) = index {
-                usize::to_le_bytes(index).to_vec()
-            } else {
-                Vec::new()
-            };
-            let txs = vec![Transaction::new_signed_with_payer(
-                &[Instruction {
-                    program_id: mock_program_id,
-                    data,
-                    accounts: vec![AccountMeta::new(Pubkey::new_unique(), false)],
-                }],
-                Some(&mint_keypair.pubkey()),
-                &[&mint_keypair],
-                blockhash,
-            )];
-            let batch = bank.prepare_batch_for_tests(txs);
-            let return_data = bank
-                .load_execute_and_commit_transactions(
-                    &batch,
-                    MAX_PROCESSING_AGE,
-                    false,
-                    false,
-                    false,
-                    true,
-                    &mut ExecuteTimings::default(),
-                )
-                .0
-                .execution_results[0]
-                .details()
-                .unwrap()
-                .return_data
-                .clone();
-            if let Some(index) = index {
-                let return_data = return_data.unwrap();
-                assert_eq!(return_data.program_id, mock_program_id);
-                let mut expected_data = vec![0u8; index];
-                expected_data.push(1u8);
-                assert_eq!(return_data.data, expected_data);
-            } else {
-                assert!(return_data.is_none());
-            }
-        }
     }
 
     #[test]
@@ -16150,6 +15612,7 @@ pub(crate) mod tests {
 
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             let transaction_context = &invoke_context.transaction_context;
@@ -16360,6 +15823,7 @@ pub(crate) mod tests {
 
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             let compute_budget = invoke_context.get_compute_budget();
@@ -16404,6 +15868,7 @@ pub(crate) mod tests {
 
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             let compute_budget = invoke_context.get_compute_budget();
@@ -16455,6 +15920,7 @@ pub(crate) mod tests {
 
         fn mock_ix_processor(
             _first_instruction_account: usize,
+            _data: &[u8],
             invoke_context: &mut InvokeContext,
         ) -> std::result::Result<(), InstructionError> {
             let compute_budget = invoke_context.get_compute_budget();
@@ -16900,12 +16366,12 @@ pub(crate) mod tests {
 
     fn mock_transfer_process_instruction(
         _first_instruction_account: usize,
+        data: &[u8],
         invoke_context: &mut InvokeContext,
     ) -> result::Result<(), InstructionError> {
         let transaction_context = &invoke_context.transaction_context;
         let instruction_context = transaction_context.get_current_instruction_context()?;
-        let instruction_data = instruction_context.get_instruction_data();
-        if let Ok(instruction) = bincode::deserialize(instruction_data) {
+        if let Ok(instruction) = bincode::deserialize(data) {
             match instruction {
                 MockTransferInstruction::Transfer(amount) => {
                     instruction_context
@@ -17631,96 +17097,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_skip_rewrite() {
-        solana_logger::setup();
-        let mut account = AccountSharedData::default();
-        let bank_slot = 10;
-        for account_rent_epoch in 0..3 {
-            account.set_rent_epoch(account_rent_epoch);
-            for rent_amount in [0, 1] {
-                for loaded_slot in (bank_slot - 1)..=bank_slot {
-                    for old_rent_epoch in account_rent_epoch.saturating_sub(1)..=account_rent_epoch
-                    {
-                        let skip = Bank::skip_rewrite(
-                            bank_slot,
-                            rent_amount,
-                            loaded_slot,
-                            old_rent_epoch,
-                            &account,
-                        );
-                        let mut should_skip = true;
-                        if rent_amount != 0
-                            || account_rent_epoch == 0
-                            || (account_rent_epoch != old_rent_epoch && loaded_slot == bank_slot)
-                        {
-                            should_skip = false;
-                        }
-                        assert_eq!(
-                            skip,
-                            should_skip,
-                            "{:?}",
-                            (
-                                account_rent_epoch,
-                                old_rent_epoch,
-                                rent_amount,
-                                loaded_slot,
-                                old_rent_epoch
-                            )
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_remember_skipped_rewrites() {
-        let GenesisConfigInfo {
-            mut genesis_config, ..
-        } = create_genesis_config_with_leader(1_000_000_000, &Pubkey::new_unique(), 42);
-        genesis_config.rent = Rent::default();
-        activate_all_features(&mut genesis_config);
-
-        let bank = Bank::new_for_tests(&genesis_config);
-
-        assert!(bank.rewrites_skipped_this_slot.read().unwrap().is_empty());
-        bank.remember_skipped_rewrites(Vec::default());
-        assert!(bank.rewrites_skipped_this_slot.read().unwrap().is_empty());
-
-        // bank's map is initially empty
-        let mut test = vec![(Pubkey::new(&[4; 32]), Hash::new(&[5; 32]))];
-        bank.remember_skipped_rewrites(test.clone());
-        assert_eq!(
-            *bank.rewrites_skipped_this_slot.read().unwrap(),
-            test.clone().into_iter().collect()
-        );
-
-        // now there is already some stuff in the bank's map
-        test.push((Pubkey::new(&[6; 32]), Hash::new(&[7; 32])));
-        bank.remember_skipped_rewrites(test[1..].to_vec());
-        assert_eq!(
-            *bank.rewrites_skipped_this_slot.read().unwrap(),
-            test.clone().into_iter().collect()
-        );
-
-        // all contents are already in map
-        bank.remember_skipped_rewrites(test[1..].to_vec());
-        assert_eq!(
-            *bank.rewrites_skipped_this_slot.read().unwrap(),
-            test.clone().into_iter().collect()
-        );
-
-        // all contents are already in map, but we're changing hash values
-        test[0].1 = Hash::new(&[8; 32]);
-        test[1].1 = Hash::new(&[9; 32]);
-        bank.remember_skipped_rewrites(test.to_vec());
-        assert_eq!(
-            *bank.rewrites_skipped_this_slot.read().unwrap(),
-            test.into_iter().collect()
-        );
-    }
-
-    #[test]
     fn test_inner_instructions_list_from_instruction_trace() {
         let instruction_trace = vec![
             vec![
@@ -17759,12 +17135,12 @@ pub(crate) mod tests {
 
     fn mock_realloc_process_instruction(
         _first_instruction_account: usize,
+        data: &[u8],
         invoke_context: &mut InvokeContext,
     ) -> result::Result<(), InstructionError> {
         let transaction_context = &invoke_context.transaction_context;
         let instruction_context = transaction_context.get_current_instruction_context()?;
-        let instruction_data = instruction_context.get_instruction_data();
-        if let Ok(instruction) = bincode::deserialize(instruction_data) {
+        if let Ok(instruction) = bincode::deserialize(data) {
             match instruction {
                 MockReallocInstruction::Realloc(new_size, new_balance, _) => {
                     // Set data length

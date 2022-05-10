@@ -6,41 +6,53 @@ use {
     solana_program_runtime::{
         invoke_context::InvokeContext, sysvar_cache::get_sysvar_with_account_check,
     },
-    solana_sdk::{feature_set, instruction::InstructionError, program_utils::limited_deserialize},
+    solana_sdk::{
+        feature_set,
+        instruction::InstructionError,
+        keyed_account::{get_signers, keyed_account_at_index, KeyedAccount},
+        program_utils::limited_deserialize,
+        pubkey::Pubkey,
+        sysvar::rent::Rent,
+    },
+    std::collections::HashSet,
 };
 
 pub fn process_instruction(
     first_instruction_account: usize,
+    data: &[u8],
     invoke_context: &mut InvokeContext,
 ) -> Result<(), InstructionError> {
-    let transaction_context = &invoke_context.transaction_context;
-    let instruction_context = transaction_context.get_current_instruction_context()?;
-    let data = instruction_context.get_instruction_data();
+    let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
     trace!("process_instruction: {:?}", data);
+    trace!("keyed_accounts: {:?}", keyed_accounts);
 
-    let mut me =
-        instruction_context.try_borrow_account(transaction_context, first_instruction_account)?;
-    if *me.get_owner() != id() {
+    let me = &mut keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+    if me.owner()? != id() {
         return Err(InstructionError::InvalidAccountOwner);
     }
 
-    let signers = instruction_context.get_signers(transaction_context);
+    let signers: HashSet<Pubkey> = get_signers(&keyed_accounts[first_instruction_account..]);
     match limited_deserialize(data)? {
         VoteInstruction::InitializeAccount(vote_init) => {
-            let rent = get_sysvar_with_account_check::rent(invoke_context, instruction_context, 1)?;
-            if !rent.is_exempt(me.get_lamports(), me.get_data().len()) {
-                return Err(InstructionError::InsufficientFunds);
-            }
-            let clock =
-                get_sysvar_with_account_check::clock(invoke_context, instruction_context, 2)?;
-            vote_state::initialize_account(&mut me, &vote_init, &signers, &clock)
+            let rent = get_sysvar_with_account_check::rent(
+                keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?,
+                invoke_context,
+            )?;
+            verify_rent_exemption(me, &rent)?;
+            let clock = get_sysvar_with_account_check::clock(
+                keyed_account_at_index(keyed_accounts, first_instruction_account + 2)?,
+                invoke_context,
+            )?;
+            vote_state::initialize_account(me, &vote_init, &signers, &clock)
         }
         VoteInstruction::Authorize(voter_pubkey, vote_authorize) => {
-            let clock =
-                get_sysvar_with_account_check::clock(invoke_context, instruction_context, 1)?;
+            let clock = get_sysvar_with_account_check::clock(
+                keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?,
+                invoke_context,
+            )?;
             vote_state::authorize(
-                &mut me,
+                me,
                 &voter_pubkey,
                 vote_authorize,
                 &signers,
@@ -48,23 +60,25 @@ pub fn process_instruction(
                 &invoke_context.feature_set,
             )
         }
-        VoteInstruction::UpdateValidatorIdentity => {
-            instruction_context.check_number_of_instruction_accounts(2)?;
-            let node_pubkey = transaction_context.get_key_of_account_at_index(
-                instruction_context.get_index_in_transaction(first_instruction_account + 1)?,
-            )?;
-            vote_state::update_validator_identity(&mut me, node_pubkey, &signers)
-        }
+        VoteInstruction::UpdateValidatorIdentity => vote_state::update_validator_identity(
+            me,
+            keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?.unsigned_key(),
+            &signers,
+        ),
         VoteInstruction::UpdateCommission(commission) => {
-            vote_state::update_commission(&mut me, commission, &signers)
+            vote_state::update_commission(me, commission, &signers)
         }
         VoteInstruction::Vote(vote) | VoteInstruction::VoteSwitch(vote, _) => {
-            let slot_hashes =
-                get_sysvar_with_account_check::slot_hashes(invoke_context, instruction_context, 1)?;
-            let clock =
-                get_sysvar_with_account_check::clock(invoke_context, instruction_context, 2)?;
+            let slot_hashes = get_sysvar_with_account_check::slot_hashes(
+                keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?,
+                invoke_context,
+            )?;
+            let clock = get_sysvar_with_account_check::clock(
+                keyed_account_at_index(keyed_accounts, first_instruction_account + 2)?,
+                invoke_context,
+            )?;
             vote_state::process_vote(
-                &mut me,
+                me,
                 &slot_hashes,
                 &clock,
                 &vote,
@@ -82,7 +96,7 @@ pub fn process_instruction(
                 let slot_hashes = sysvar_cache.get_slot_hashes()?;
                 let clock = sysvar_cache.get_clock()?;
                 vote_state::process_vote_state_update(
-                    &mut me,
+                    me,
                     slot_hashes.slot_hashes(),
                     &clock,
                     vote_state_update,
@@ -93,7 +107,7 @@ pub fn process_instruction(
             }
         }
         VoteInstruction::Withdraw(lamports) => {
-            instruction_context.check_number_of_instruction_accounts(2)?;
+            let to = keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?;
             let rent_sysvar = if invoke_context
                 .feature_set
                 .is_active(&feature_set::reject_non_rent_exempt_vote_withdraws::id())
@@ -112,13 +126,10 @@ pub fn process_instruction(
                 None
             };
 
-            drop(me);
             vote_state::withdraw(
-                transaction_context,
-                instruction_context,
-                first_instruction_account,
+                me,
                 lamports,
-                first_instruction_account + 1,
+                to,
                 &signers,
                 rent_sysvar.as_deref(),
                 clock_if_feature_active.as_deref(),
@@ -129,17 +140,16 @@ pub fn process_instruction(
                 .feature_set
                 .is_active(&feature_set::vote_stake_checked_instructions::id())
             {
-                instruction_context.check_number_of_instruction_accounts(4)?;
-                let voter_pubkey = transaction_context.get_key_of_account_at_index(
-                    instruction_context.get_index_in_transaction(first_instruction_account + 3)?,
+                let voter_pubkey =
+                    &keyed_account_at_index(keyed_accounts, first_instruction_account + 3)?
+                        .signer_key()
+                        .ok_or(InstructionError::MissingRequiredSignature)?;
+                let clock = get_sysvar_with_account_check::clock(
+                    keyed_account_at_index(keyed_accounts, first_instruction_account + 1)?,
+                    invoke_context,
                 )?;
-                if !instruction_context.is_signer(first_instruction_account + 3)? {
-                    return Err(InstructionError::MissingRequiredSignature);
-                }
-                let clock =
-                    get_sysvar_with_account_check::clock(invoke_context, instruction_context, 1)?;
                 vote_state::authorize(
-                    &mut me,
+                    me,
                     voter_pubkey,
                     vote_authorize,
                     &signers,
@@ -150,6 +160,17 @@ pub fn process_instruction(
                 Err(InstructionError::InvalidInstructionData)
             }
         }
+    }
+}
+
+fn verify_rent_exemption(
+    keyed_account: &KeyedAccount,
+    rent: &Rent,
+) -> Result<(), InstructionError> {
+    if !rent.is_exempt(keyed_account.lamports()?, keyed_account.data_len()?) {
+        Err(InstructionError::InsufficientFunds)
+    } else {
+        Ok(())
     }
 }
 
@@ -177,10 +198,9 @@ mod tests {
             feature_set::FeatureSet,
             hash::Hash,
             instruction::{AccountMeta, Instruction},
-            pubkey::Pubkey,
-            sysvar::{self, clock::Clock, rent::Rent, slot_hashes::SlotHashes},
+            sysvar::{self, clock::Clock, slot_hashes::SlotHashes},
         },
-        std::{collections::HashSet, str::FromStr},
+        std::str::FromStr,
     };
 
     fn create_default_account() -> AccountSharedData {
@@ -199,8 +219,6 @@ mod tests {
             instruction_data,
             transaction_accounts,
             instruction_accounts,
-            None,
-            None,
             expected_result,
             super::process_instruction,
         )
@@ -218,10 +236,17 @@ mod tests {
             instruction_data,
             transaction_accounts,
             instruction_accounts,
-            None,
-            Some(std::sync::Arc::new(FeatureSet::default())),
             expected_result,
-            super::process_instruction,
+            |first_instruction_account: usize,
+             instruction_data: &[u8],
+             invoke_context: &mut InvokeContext| {
+                invoke_context.feature_set = std::sync::Arc::new(FeatureSet::default());
+                super::process_instruction(
+                    first_instruction_account,
+                    instruction_data,
+                    invoke_context,
+                )
+            },
         )
     }
 

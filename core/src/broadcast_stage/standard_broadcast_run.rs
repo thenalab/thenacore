@@ -10,7 +10,8 @@ use {
     },
     solana_entry::entry::Entry,
     solana_ledger::shred::{
-        ProcessShredsStats, Shred, ShredFlags, Shredder, MAX_DATA_SHREDS_PER_FEC_BLOCK,
+        ProcessShredsStats, Shred, Shredder, MAX_DATA_SHREDS_PER_FEC_BLOCK,
+        SHRED_TICK_REFERENCE_MASK,
     },
     solana_sdk::{
         signature::Keypair,
@@ -62,7 +63,6 @@ impl StandardBroadcastRun {
         max_ticks_in_slot: u8,
         stats: &mut ProcessShredsStats,
     ) -> Vec<Shred> {
-        const SHRED_TICK_REFERENCE_MASK: u8 = ShredFlags::SHRED_TICK_REFERENCE_MASK.bits();
         let (current_slot, _) = self.current_slot_and_parent.unwrap();
         match self.unfinished_slot {
             None => Vec::default(),
@@ -76,13 +76,14 @@ impl StandardBroadcastRun {
                     state.slot,
                     state.next_shred_index,
                     parent_offset as u16,
-                    &[], // data
-                    ShredFlags::LAST_SHRED_IN_SLOT,
+                    None, // data
+                    true, // is_last_in_fec_set
+                    true, // is_last_in_slot
                     reference_tick,
                     self.shred_version,
                     fec_set_index.unwrap(),
                 );
-                shred.sign(keypair);
+                Shredder::sign_shred(keypair, &mut shred);
                 state.data_shreds_buffer.push(shred.clone());
                 let mut shreds = make_coding_shreds(
                     keypair,
@@ -303,7 +304,7 @@ impl StandardBroadcastRun {
         process_stats.receive_elapsed = duration_as_us(&receive_elapsed);
         process_stats.coding_send_elapsed = coding_send_time.as_us();
 
-        self.process_shreds_stats += process_stats;
+        self.process_shreds_stats.update(&process_stats);
 
         if last_tick_height == bank.max_tick_height() {
             self.report_and_reset_stats(false);
@@ -390,23 +391,59 @@ impl StandardBroadcastRun {
     }
 
     fn report_and_reset_stats(&mut self, was_interrupted: bool) {
+        let stats = &self.process_shreds_stats;
         let unfinished_slot = self.unfinished_slot.as_ref().unwrap();
         if was_interrupted {
-            self.process_shreds_stats.submit(
+            datapoint_info!(
                 "broadcast-process-shreds-interrupted-stats",
-                unfinished_slot.slot,
-                unfinished_slot.next_shred_index, // num_data_shreds,
-                None,                             // slot_broadcast_time
+                ("slot", unfinished_slot.slot as i64, i64),
+                ("shredding_time", stats.shredding_elapsed, i64),
+                ("receive_time", stats.receive_elapsed, i64),
+                (
+                    "num_data_shreds",
+                    unfinished_slot.next_shred_index as i64,
+                    i64
+                ),
+                (
+                    "get_leader_schedule_time",
+                    stats.get_leader_schedule_elapsed,
+                    i64
+                ),
+                ("serialize_shreds_time", stats.serialize_elapsed, i64),
+                ("gen_data_time", stats.gen_data_elapsed, i64),
+                ("gen_coding_time", stats.gen_coding_elapsed, i64),
+                ("sign_coding_time", stats.sign_coding_elapsed, i64),
+                ("coding_send_time", stats.coding_send_elapsed, i64),
             );
         } else {
-            let slot_broadcast_time = self.slot_broadcast_start.unwrap().elapsed();
-            self.process_shreds_stats.submit(
+            datapoint_info!(
                 "broadcast-process-shreds-stats",
-                unfinished_slot.slot,
-                unfinished_slot.next_shred_index, // num_data_shreds,
-                Some(slot_broadcast_time),
+                ("slot", unfinished_slot.slot as i64, i64),
+                ("shredding_time", stats.shredding_elapsed, i64),
+                ("receive_time", stats.receive_elapsed, i64),
+                (
+                    "num_data_shreds",
+                    unfinished_slot.next_shred_index as i64,
+                    i64
+                ),
+                (
+                    "slot_broadcast_time",
+                    self.slot_broadcast_start.unwrap().elapsed().as_micros() as i64,
+                    i64
+                ),
+                (
+                    "get_leader_schedule_time",
+                    stats.get_leader_schedule_elapsed,
+                    i64
+                ),
+                ("serialize_shreds_time", stats.serialize_elapsed, i64),
+                ("gen_data_time", stats.gen_data_elapsed, i64),
+                ("gen_coding_time", stats.gen_coding_elapsed, i64),
+                ("sign_coding_time", stats.sign_coding_elapsed, i64),
+                ("coding_send_time", stats.coding_send_elapsed, i64),
             );
         }
+        self.process_shreds_stats.reset();
     }
 }
 

@@ -71,7 +71,7 @@ pub mod tests {
         super::*,
         solana_ledger::{
             genesis_utils::create_genesis_config_with_leader,
-            shred::{Shred, ShredFlags},
+            shred::{Shred, Shredder},
         },
         solana_perf::packet::Packet,
         solana_runtime::bank::Bank,
@@ -85,8 +85,9 @@ pub mod tests {
             0xdead_c0de,
             0xc0de,
             0xdead,
-            &[1, 2, 3, 4],
-            ShredFlags::LAST_SHRED_IN_SLOT,
+            Some(&[1, 2, 3, 4]),
+            true,
+            true,
             0,
             0,
             0xc0de,
@@ -94,25 +95,26 @@ pub mod tests {
         let mut batches = [PacketBatch::default(), PacketBatch::default()];
 
         let keypair = Keypair::new();
-        shred.sign(&keypair);
+        Shredder::sign_shred(&keypair, &mut shred);
         batches[0].packets.resize(1, Packet::default());
-        batches[0].packets[0].data[0..shred.payload().len()].copy_from_slice(shred.payload());
-        batches[0].packets[0].meta.size = shred.payload().len();
+        batches[0].packets[0].data[0..shred.payload.len()].copy_from_slice(&shred.payload);
+        batches[0].packets[0].meta.size = shred.payload.len();
 
         let mut shred = Shred::new_from_data(
             0xc0de_dead,
             0xc0de,
             0xdead,
-            &[1, 2, 3, 4],
-            ShredFlags::LAST_SHRED_IN_SLOT,
+            Some(&[1, 2, 3, 4]),
+            true,
+            true,
             0,
             0,
             0xc0de,
         );
-        shred.sign(&keypair);
+        Shredder::sign_shred(&keypair, &mut shred);
         batches[1].packets.resize(1, Packet::default());
-        batches[1].packets[0].data[0..shred.payload().len()].copy_from_slice(shred.payload());
-        batches[1].packets[0].meta.size = shred.payload().len();
+        batches[1].packets[0].data[0..shred.payload.len()].copy_from_slice(&shred.payload);
+        batches[1].packets[0].meta.size = shred.payload.len();
 
         let expected: HashSet<u64> = [0xc0de_dead, 0xdead_c0de].iter().cloned().collect();
         assert_eq!(ShredSigVerifier::read_slots(&batches), expected);
@@ -136,30 +138,32 @@ pub mod tests {
             0,
             0xc0de,
             0xdead,
-            &[1, 2, 3, 4],
-            ShredFlags::LAST_SHRED_IN_SLOT,
+            Some(&[1, 2, 3, 4]),
+            true,
+            true,
             0,
             0,
             0xc0de,
         );
-        shred.sign(&leader_keypair);
-        batches[0].packets[0].data[0..shred.payload().len()].copy_from_slice(shred.payload());
-        batches[0].packets[0].meta.size = shred.payload().len();
+        Shredder::sign_shred(&leader_keypair, &mut shred);
+        batches[0].packets[0].data[0..shred.payload.len()].copy_from_slice(&shred.payload);
+        batches[0].packets[0].meta.size = shred.payload.len();
 
         let mut shred = Shred::new_from_data(
             0,
             0xbeef,
             0xc0de,
-            &[1, 2, 3, 4],
-            ShredFlags::LAST_SHRED_IN_SLOT,
+            Some(&[1, 2, 3, 4]),
+            true,
+            true,
             0,
             0,
             0xc0de,
         );
         let wrong_keypair = Keypair::new();
-        shred.sign(&wrong_keypair);
-        batches[0].packets[1].data[0..shred.payload().len()].copy_from_slice(shred.payload());
-        batches[0].packets[1].meta.size = shred.payload().len();
+        Shredder::sign_shred(&wrong_keypair, &mut shred);
+        batches[0].packets[1].data[0..shred.payload.len()].copy_from_slice(&shred.payload);
+        batches[0].packets[1].meta.size = shred.payload.len();
 
         let num_packets = solana_perf::sigverify::count_packets_in_batches(&batches);
         let rv = verifier.verify_batches(batches, num_packets);

@@ -542,7 +542,6 @@ pub mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_dos_local_cluster_transactions() {
         let num_nodes = 1;
         let cluster =

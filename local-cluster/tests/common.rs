@@ -26,7 +26,6 @@ use {
         account::AccountSharedData,
         clock::{self, Slot, DEFAULT_MS_PER_SLOT, DEFAULT_TICKS_PER_SLOT},
         hash::Hash,
-        native_token::LAMPORTS_PER_SOL,
         pubkey::Pubkey,
         signature::{Keypair, Signer},
     },
@@ -47,9 +46,6 @@ use {
 
 pub const RUST_LOG_FILTER: &str =
     "error,solana_core::replay_stage=warn,solana_local_cluster=info,local_cluster=info";
-
-pub const DEFAULT_CLUSTER_LAMPORTS: u64 = 10_000_000 * LAMPORTS_PER_SOL;
-pub const DEFAULT_NODE_STAKE: u64 = 10 * LAMPORTS_PER_SOL;
 
 pub fn last_vote_in_tower(tower_path: &Path, node_pubkey: &Pubkey) -> Option<(Slot, Hash)> {
     restore_tower(tower_path, node_pubkey).map(|tower| tower.last_voted_slot_hash().unwrap())
@@ -79,27 +75,14 @@ pub fn open_blockstore(ledger_path: &Path) -> Blockstore {
     Blockstore::open_with_options(
         ledger_path,
         BlockstoreOptions {
-            access_type: AccessType::Primary,
+            access_type: AccessType::TryPrimaryThenSecondary,
             recovery_mode: None,
             enforce_ulimit_nofile: true,
             ..BlockstoreOptions::default()
         },
     )
-    // Fall back on Secondary if Primary fails; Primary will fail if
-    // a handle to Blockstore is being held somewhere else
-    .unwrap_or_else(|_| {
-        Blockstore::open_with_options(
-            ledger_path,
-            BlockstoreOptions {
-                access_type: AccessType::Secondary,
-                recovery_mode: None,
-                enforce_ulimit_nofile: true,
-                ..BlockstoreOptions::default()
-            },
-        )
-        .unwrap_or_else(|e| {
-            panic!("Failed to open ledger at {:?}, err: {}", ledger_path, e);
-        })
+    .unwrap_or_else(|e| {
+        panic!("Failed to open ledger at {:?}, err: {}", ledger_path, e);
     })
 }
 
@@ -149,8 +132,9 @@ pub fn ms_for_n_slots(num_blocks: u64, ticks_per_slot: u64) -> u64 {
 
 #[allow(clippy::assertions_on_constants)]
 pub fn run_kill_partition_switch_threshold<C>(
-    stakes_to_kill: &[(usize, usize)],
-    alive_stakes: &[(usize, usize)],
+    stakes_to_kill: &[&[(usize, usize)]],
+    alive_stakes: &[&[(usize, usize)]],
+    partition_duration: Option<u64>,
     ticks_per_slot: Option<u64>,
     partition_context: C,
     on_partition_start: impl Fn(&mut LocalCluster, &[Pubkey], Vec<ClusterValidatorInfo>, &mut C),
@@ -169,15 +153,20 @@ pub fn run_kill_partition_switch_threshold<C>(
     // 1) Spins up three partitions
     // 2) Kills the first partition with the stake `failures_stake`
     // 5) runs `on_partition_resolved`
-    let partitions: Vec<(usize, usize)> = stakes_to_kill
+    let partitions: Vec<&[(usize, usize)]> = stakes_to_kill
         .iter()
         .cloned()
         .chain(alive_stakes.iter().cloned())
         .collect();
 
-    let stake_partitions: Vec<usize> = partitions.iter().map(|(stake, _)| *stake).collect();
-    let num_slots_per_validator: Vec<usize> =
-        partitions.iter().map(|(_, num_slots)| *num_slots).collect();
+    let stake_partitions: Vec<Vec<usize>> = partitions
+        .iter()
+        .map(|stakes_and_slots| stakes_and_slots.iter().map(|(stake, _)| *stake).collect())
+        .collect();
+    let num_slots_per_validator: Vec<usize> = partitions
+        .iter()
+        .flat_map(|stakes_and_slots| stakes_and_slots.iter().map(|(_, num_slots)| *num_slots))
+        .collect();
 
     let (leader_schedule, validator_keys) =
         create_custom_leader_schedule_with_random_keys(&num_slots_per_validator);
@@ -213,6 +202,7 @@ pub fn run_kill_partition_switch_threshold<C>(
         on_partition_start,
         on_before_partition_resolved,
         on_partition_resolved,
+        partition_duration,
         ticks_per_slot,
         vec![],
     )
@@ -252,17 +242,19 @@ pub fn create_custom_leader_schedule_with_random_keys(
 /// continues to achieve consensus
 /// # Arguments
 /// * `partitions` - A slice of partition configurations, where each partition
-/// configuration is a usize representing a node's stake
+/// configuration is a slice of (usize, bool), representing a node's stake and
+/// whether or not it should be killed during the partition
 /// * `leader_schedule` - An option that specifies whether the cluster should
 /// run with a fixed, predetermined leader schedule
 #[allow(clippy::cognitive_complexity)]
 pub fn run_cluster_partition<C>(
-    partitions: &[usize],
+    partitions: &[Vec<usize>],
     leader_schedule: Option<(LeaderSchedule, Vec<Arc<Keypair>>)>,
     mut context: C,
     on_partition_start: impl FnOnce(&mut LocalCluster, &mut C),
     on_before_partition_resolved: impl FnOnce(&mut LocalCluster, &mut C),
     on_partition_resolved: impl FnOnce(&mut LocalCluster, &mut C),
+    partition_duration: Option<u64>,
     ticks_per_slot: Option<u64>,
     additional_accounts: Vec<(Pubkey, AccountSharedData)>,
 ) {
@@ -271,35 +263,39 @@ pub fn run_cluster_partition<C>(
     let num_nodes = partitions.len();
     let node_stakes: Vec<_> = partitions
         .iter()
-        .map(|stake_weight| 100 * *stake_weight as u64)
+        .flat_map(|p| p.iter().map(|stake_weight| 100 * *stake_weight as u64))
         .collect();
     assert_eq!(node_stakes.len(), num_nodes);
     let cluster_lamports = node_stakes.iter().sum::<u64>() * 2;
-    let turbine_disabled = Arc::new(AtomicBool::new(false));
+    let enable_partition = Arc::new(AtomicBool::new(true));
     let mut validator_config = ValidatorConfig {
-        turbine_disabled: Some(turbine_disabled.clone()),
+        enable_partition: Some(enable_partition.clone()),
         ..ValidatorConfig::default_for_test()
     };
 
-    let (validator_keys, partition_duration): (Vec<_>, Duration) = {
+    // Returns:
+    // 1) The keys for the validators
+    // 2) The amount of time it would take to iterate through one full iteration of the given
+    // leader schedule
+    let (validator_keys, leader_schedule_time): (Vec<_>, u64) = {
         if let Some((leader_schedule, validator_keys)) = leader_schedule {
             assert_eq!(validator_keys.len(), num_nodes);
             let num_slots_per_rotation = leader_schedule.num_slots() as u64;
             let fixed_schedule = FixedSchedule {
+                start_epoch: 0,
                 leader_schedule: Arc::new(leader_schedule),
             };
             validator_config.fixed_leader_schedule = Some(fixed_schedule);
             (
                 validator_keys,
-                // partition for the duration of one full iteration of the  leader schedule
-                Duration::from_millis(num_slots_per_rotation * clock::DEFAULT_MS_PER_SLOT),
+                num_slots_per_rotation * clock::DEFAULT_MS_PER_SLOT,
             )
         } else {
             (
                 iter::repeat_with(|| Arc::new(Keypair::new()))
                     .take(partitions.len())
                     .collect(),
-                Duration::from_secs(10),
+                10_000,
             )
         }
     };
@@ -355,28 +351,30 @@ pub fn run_cluster_partition<C>(
 
     info!("PARTITION_TEST start partition");
     on_partition_start(&mut cluster, &mut context);
-    turbine_disabled.store(true, Ordering::Relaxed);
+    enable_partition.store(false, Ordering::Relaxed);
 
-    sleep(partition_duration);
+    sleep(Duration::from_millis(
+        partition_duration.unwrap_or(leader_schedule_time),
+    ));
 
     on_before_partition_resolved(&mut cluster, &mut context);
     info!("PARTITION_TEST remove partition");
-    turbine_disabled.store(false, Ordering::Relaxed);
+    enable_partition.store(true, Ordering::Relaxed);
 
     // Give partitions time to propagate their blocks from during the partition
     // after the partition resolves
-    let timeout_duration = Duration::from_secs(10);
-    let propagation_duration = partition_duration;
+    let timeout = 10_000;
+    let propagation_time = leader_schedule_time;
     info!(
         "PARTITION_TEST resolving partition. sleeping {} ms",
-        timeout_duration.as_millis()
+        timeout
     );
-    sleep(timeout_duration);
+    sleep(Duration::from_millis(timeout));
     info!(
         "PARTITION_TEST waiting for blocks to propagate after partition {}ms",
-        propagation_duration.as_millis()
+        propagation_time
     );
-    sleep(propagation_duration);
+    sleep(Duration::from_millis(propagation_time));
     info!("PARTITION_TEST resuming normal operation");
     on_partition_resolved(&mut cluster, &mut context);
 }

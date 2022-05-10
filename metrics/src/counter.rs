@@ -32,6 +32,7 @@ pub struct CounterPoint {
 }
 
 impl CounterPoint {
+    #[cfg(test)]
     pub fn new(name: &'static str) -> Self {
         CounterPoint {
             name,
@@ -58,7 +59,11 @@ macro_rules! create_counter {
 #[macro_export]
 macro_rules! inc_counter {
     ($name:expr, $level:expr, $count:expr) => {
-        unsafe { $name.inc($level, $count) };
+        unsafe {
+            if log_enabled!($level) {
+                $name.inc($level, $count)
+            }
+        };
     };
 }
 

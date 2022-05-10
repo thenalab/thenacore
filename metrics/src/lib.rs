@@ -1,8 +1,7 @@
 #![allow(clippy::integer_arithmetic)]
 pub mod counter;
 pub mod datapoint;
-pub mod metrics;
-pub mod poh_timing_point;
+mod metrics;
 pub use crate::metrics::{flush, query, set_host_id, set_panic_hook, submit};
 use std::sync::{
     atomic::{AtomicU64, Ordering},

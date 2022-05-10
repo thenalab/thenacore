@@ -2317,7 +2317,7 @@ impl fmt::Display for CliBlock {
                     format!(
                         "{}◎{:<14.9}",
                         sign,
-                        lamports_to_sol(reward.lamports.unsigned_abs())
+                        lamports_to_sol(reward.lamports.abs() as u64)
                     ),
                     if reward.post_balance == 0 {
                         "          -                 -".to_string()
@@ -2342,7 +2342,7 @@ impl fmt::Display for CliBlock {
                 f,
                 "Total Rewards: {}◎{:<12.9}",
                 sign,
-                lamports_to_sol(total_rewards.unsigned_abs())
+                lamports_to_sol(total_rewards.abs() as u64)
             )?;
         }
         for (index, transaction_with_meta) in

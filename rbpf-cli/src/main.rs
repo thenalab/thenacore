@@ -313,13 +313,11 @@ native machine code before execting it in the virtual machine.",
         _ => {}
     }
 
-    invoke_context
-        .set_orig_account_lengths(account_lengths)
-        .unwrap();
     let mut vm = create_vm(
         &executable,
         parameter_bytes.as_slice_mut(),
         &mut invoke_context,
+        &account_lengths,
     )
     .unwrap();
     let start_time = Instant::now();
@@ -427,6 +425,6 @@ impl<'a> LazyAnalysis<'a> {
             return analysis;
         }
         self.analysis
-            .insert(Analysis::from_executable(self.executable).unwrap())
+            .insert(Analysis::from_executable(self.executable))
     }
 }

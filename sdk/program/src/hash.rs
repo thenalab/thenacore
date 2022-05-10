@@ -1,7 +1,4 @@
-//! Hashing with the [SHA-256] hash function, and a general [`Hash`] type.
-//!
-//! [SHA-256]: https://en.wikipedia.org/wiki/SHA-2
-//! [`Hash`]: struct@Hash
+//! The `hash` module provides functions for creating SHA-256 hashes.
 
 use {
     crate::{sanitize::Sanitize, wasm_bindgen},
@@ -11,21 +8,10 @@ use {
     thiserror::Error,
 };
 
-/// Size of a hash in bytes.
 pub const HASH_BYTES: usize = 32;
-/// Maximum string length of a base58 encoded hash.
+/// Maximum string length of a base58 encoded hash
 const MAX_BASE58_LEN: usize = 44;
 
-/// A hash; the 32-byte output of a hashing algorithm.
-///
-/// This struct is used most often in `solana-sdk` and related crates to contain
-/// a [SHA-256] hash, but may instead contain a [blake3] hash, as created by the
-/// [`blake3`] module (and used in [`Message::hash`]).
-///
-/// [SHA-256]: https://en.wikipedia.org/wiki/SHA-2
-/// [blake3]: https://github.com/BLAKE3-team/BLAKE3
-/// [`blake3`]: crate::blake3
-/// [`Message::hash`]: crate::message::Message::hash
 #[wasm_bindgen]
 #[derive(
     Serialize,
@@ -68,12 +54,6 @@ impl Hasher {
 }
 
 impl Sanitize for Hash {}
-
-impl From<[u8; HASH_BYTES]> for Hash {
-    fn from(from: [u8; 32]) -> Self {
-        Self(from)
-    }
-}
 
 impl AsRef<[u8]> for Hash {
     fn as_ref(&self) -> &[u8] {

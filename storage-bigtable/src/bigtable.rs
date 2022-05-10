@@ -817,7 +817,7 @@ mod tests {
         prost::Message,
         solana_sdk::{
             hash::Hash, message::v0::LoadedAddresses, signature::Keypair, system_transaction,
-            transaction::VersionedTransaction, transaction_context::TransactionReturnData,
+            transaction::VersionedTransaction,
         },
         solana_storage_proto::convert::generated,
         solana_transaction_status::{
@@ -867,7 +867,6 @@ mod tests {
                 post_token_balances: Some(vec![]),
                 rewards: Some(vec![]),
                 loaded_addresses: LoadedAddresses::default(),
-                return_data: Some(TransactionReturnData::default()),
             },
         });
         let expected_block = ConfirmedBlock {
@@ -925,7 +924,6 @@ mod tests {
                 meta.pre_token_balances = None; // Legacy bincode implementation does not support token balances
                 meta.post_token_balances = None; // Legacy bincode implementation does not support token balances
                 meta.rewards = None; // Legacy bincode implementation does not support rewards
-                meta.return_data = None; // Legacy bincode implementation does not support return data
             }
             assert_eq!(block, bincode_block.into());
         } else {

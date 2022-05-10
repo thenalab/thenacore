@@ -1,8 +1,5 @@
-//! Configuration for network [rent].
-//!
-//! [rent]: https://docs.solana.com/implemented-proposals/rent
-
 #![allow(clippy::integer_arithmetic)]
+//! configuration for network rent
 use crate::clock::DEFAULT_SLOTS_PER_EPOCH;
 
 #[repr(C)]

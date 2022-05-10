@@ -13,7 +13,10 @@ use {
     },
     solana_transaction_status::{TransactionDetails, UiTransactionEncoding},
     std::{
-        collections::hash_map::{Entry, HashMap},
+        collections::{
+            hash_map::{Entry, HashMap},
+            HashSet,
+        },
         fmt,
         sync::{
             atomic::{AtomicU64, Ordering},
@@ -288,21 +291,6 @@ impl SubscriptionControl {
     }
 
     #[cfg(test)]
-    pub fn logs_subscribed(&self, pubkey: Option<&Pubkey>) -> bool {
-        self.0.subscriptions.iter().any(|item| {
-            if let SubscriptionParams::Logs(params) = item.key() {
-                let subscribed_pubkey = match &params.kind {
-                    LogsSubscriptionKind::All | LogsSubscriptionKind::AllWithVotes => None,
-                    LogsSubscriptionKind::Single(pubkey) => Some(pubkey),
-                };
-                subscribed_pubkey == pubkey
-            } else {
-                false
-            }
-        })
-    }
-
-    #[cfg(test)]
     pub fn signature_subscribed(&self, signature: &Signature) -> bool {
         self.0.subscriptions.iter().any(|item| {
             if let SubscriptionParams::Signature(params) = item.key() {
@@ -385,21 +373,20 @@ impl LogsSubscriptionsIndex {
     }
 
     fn update_config(&self) {
-        let mentioned_addresses = self.single_count.keys().copied().collect();
         let config = if self.all_with_votes_count > 0 {
             TransactionLogCollectorConfig {
                 filter: TransactionLogCollectorFilter::AllWithVotes,
-                mentioned_addresses,
+                mentioned_addresses: HashSet::new(),
             }
         } else if self.all_count > 0 {
             TransactionLogCollectorConfig {
                 filter: TransactionLogCollectorFilter::All,
-                mentioned_addresses,
+                mentioned_addresses: HashSet::new(),
             }
         } else {
             TransactionLogCollectorConfig {
                 filter: TransactionLogCollectorFilter::OnlyMentionedAddresses,
-                mentioned_addresses,
+                mentioned_addresses: self.single_count.keys().copied().collect(),
             }
         };
 

@@ -1,5 +1,9 @@
-//! named accounts for synthesized data accounts for bank state, etc.
+//! Access to special accounts with dynamically-updated data.
 //!
+//! For more details see the Solana [documentation on sysvars][sysvardoc].
+//!
+//! [sysvardoc]: https://docs.solana.com/developing/runtime-facilities/sysvars
+
 use {
     crate::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey},
     lazy_static::lazy_static,
@@ -37,7 +41,6 @@ pub fn is_sysvar_id(id: &Pubkey) -> bool {
     ALL_IDS.iter().any(|key| key == id)
 }
 
-/// Declares an ID that implements [`SysvarId`].
 #[macro_export]
 macro_rules! declare_sysvar_id(
     ($name:expr, $type:ty) => (
@@ -61,7 +64,6 @@ macro_rules! declare_sysvar_id(
     )
 );
 
-/// Same as [`declare_sysvar_id`] except that it reports that this ID has been deprecated.
 #[macro_export]
 macro_rules! declare_deprecated_sysvar_id(
     ($name:expr, $type:ty) => (
@@ -124,7 +126,6 @@ pub trait Sysvar:
     }
 }
 
-/// Implements the [`Sysvar::get`] method for both BPF and host targets.
 #[macro_export]
 macro_rules! impl_sysvar_get {
     ($syscall_name:ident) => {
@@ -140,10 +141,10 @@ macro_rules! impl_sysvar_get {
                 $syscall_name(var_addr)
             };
             #[cfg(not(target_arch = "bpf"))]
-            let result = $crate::program_stubs::$syscall_name(var_addr);
+            let result = crate::program_stubs::$syscall_name(var_addr);
 
             match result {
-                $crate::entrypoint::SUCCESS => Ok(var),
+                crate::entrypoint::SUCCESS => Ok(var),
                 e => Err(e.into()),
             }
         }

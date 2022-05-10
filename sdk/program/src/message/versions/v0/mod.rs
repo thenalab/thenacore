@@ -10,21 +10,18 @@
 //! [future message format]: https://docs.solana.com/proposals/transactions-v2
 
 use crate::{
-    address_lookup_table_account::AddressLookupTableAccount,
     bpf_loader_upgradeable,
     hash::Hash,
-    instruction::{CompiledInstruction, Instruction},
-    message::{
-        compiled_keys::CompileError, legacy::BUILTIN_PROGRAMS_KEYS, AccountKeys, CompiledKeys,
-        MessageHeader, MESSAGE_VERSION_PREFIX,
-    },
+    instruction::CompiledInstruction,
+    message::{legacy::BUILTIN_PROGRAMS_KEYS, MessageHeader, MESSAGE_VERSION_PREFIX},
     pubkey::Pubkey,
-    sanitize::{Sanitize, SanitizeError},
+    sanitize::SanitizeError,
     short_vec, sysvar,
 };
-pub use loaded::*;
 
 mod loaded;
+
+pub use loaded::*;
 
 /// Address table lookups describe an on-chain address lookup table to use
 /// for loading more readonly and writable accounts in a single tx.
@@ -52,7 +49,9 @@ pub struct MessageAddressTableLookup {
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq, Eq, Clone, AbiExample)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
-    /// The message header, identifying signed and read-only `account_keys`
+    /// The message header, identifying signed and read-only `account_keys`.
+    /// Header values only describe static `account_keys`, they do not describe
+    /// any additional account keys loaded via address table lookups.
     pub header: MessageHeader,
 
     /// List of accounts loaded by this transaction.
@@ -67,7 +66,10 @@ pub struct Message {
     ///
     /// # Notes
     ///
-    /// Account and program indexes will index into the list of addresses
+    /// Program indexes must index into the list of message `account_keys` because
+    /// program id's cannot be dynamically loaded from a lookup table.
+    ///
+    /// Account indexes must index into the list of addresses
     /// constructed from the concatenation of three key lists:
     ///   1) message `account_keys`
     ///   2) ordered list of keys loaded from `writable` lookup table indexes
@@ -81,13 +83,13 @@ pub struct Message {
     pub address_table_lookups: Vec<MessageAddressTableLookup>,
 }
 
-impl Sanitize for Message {
-    fn sanitize(&self) -> Result<(), SanitizeError> {
-        // signing area and read-only non-signing area should not
-        // overlap
+impl Message {
+    /// Sanitize message fields and compiled instruction indexes
+    pub fn sanitize(&self, reject_dynamic_program_ids: bool) -> Result<(), SanitizeError> {
+        let num_static_account_keys = self.account_keys.len();
         if usize::from(self.header.num_required_signatures)
             .saturating_add(usize::from(self.header.num_readonly_unsigned_accounts))
-            > self.account_keys.len()
+            > num_static_account_keys
         {
             return Err(SanitizeError::IndexOutOfBounds);
         }
@@ -97,29 +99,59 @@ impl Sanitize for Message {
             return Err(SanitizeError::InvalidValue);
         }
 
-        let mut num_loaded_accounts = self.account_keys.len();
-        for lookup in &self.address_table_lookups {
-            let num_table_loaded_accounts = lookup
-                .writable_indexes
-                .len()
-                .saturating_add(lookup.readonly_indexes.len());
+        let num_dynamic_account_keys = {
+            let mut total_lookup_keys: usize = 0;
+            for lookup in &self.address_table_lookups {
+                let num_lookup_indexes = lookup
+                    .writable_indexes
+                    .len()
+                    .saturating_add(lookup.readonly_indexes.len());
 
-            // each lookup table must be used to load at least one account
-            if num_table_loaded_accounts == 0 {
-                return Err(SanitizeError::InvalidValue);
+                // each lookup table must be used to load at least one account
+                if num_lookup_indexes == 0 {
+                    return Err(SanitizeError::InvalidValue);
+                }
+
+                total_lookup_keys = total_lookup_keys.saturating_add(num_lookup_indexes);
             }
+            total_lookup_keys
+        };
 
-            num_loaded_accounts = num_loaded_accounts.saturating_add(num_table_loaded_accounts);
+        // this is redundant with the above sanitization checks which require that:
+        // 1) the header describes at least 1 RW account
+        // 2) the header doesn't describe more account keys than the number of account keys
+        if num_static_account_keys == 0 {
+            return Err(SanitizeError::InvalidValue);
         }
 
-        // the number of loaded accounts must be <= 256 since account indices are
-        // encoded as `u8`
-        if num_loaded_accounts > 256 {
+        // the combined number of static and dynamic account keys must be <= 256
+        // since account indices are encoded as `u8`
+        let total_account_keys = num_static_account_keys.saturating_add(num_dynamic_account_keys);
+        if total_account_keys > 256 {
             return Err(SanitizeError::IndexOutOfBounds);
         }
 
+        // `expect` is safe because of earlier check that
+        // `num_static_account_keys` is non-zero
+        let max_account_ix = total_account_keys
+            .checked_sub(1)
+            .expect("message doesn't contain any account keys");
+
+        // switch to rejecting program ids loaded from lookup tables so that
+        // static analysis on program instructions can be performed without
+        // loading on-chain data from a bank
+        let max_program_id_ix = if reject_dynamic_program_ids {
+            // `expect` is safe because of earlier check that
+            // `num_static_account_keys` is non-zero
+            num_static_account_keys
+                .checked_sub(1)
+                .expect("message doesn't contain any static account keys")
+        } else {
+            max_account_ix
+        };
+
         for ci in &self.instructions {
-            if usize::from(ci.program_id_index) >= num_loaded_accounts {
+            if usize::from(ci.program_id_index) > max_program_id_ix {
                 return Err(SanitizeError::IndexOutOfBounds);
             }
             // A program cannot be a payer.
@@ -127,7 +159,7 @@ impl Sanitize for Message {
                 return Err(SanitizeError::IndexOutOfBounds);
             }
             for ai in &ci.accounts {
-                if usize::from(*ai) >= num_loaded_accounts {
+                if usize::from(*ai) > max_account_ix {
                     return Err(SanitizeError::IndexOutOfBounds);
                 }
             }
@@ -138,118 +170,6 @@ impl Sanitize for Message {
 }
 
 impl Message {
-    /// Create a signable transaction message from a `payer` public key,
-    /// `recent_blockhash`, list of `instructions`, and a list of
-    /// `address_lookup_table_accounts`.
-    ///
-    /// # Examples
-    ///
-    /// This example uses the [`solana_address_lookup_table_program`], [`solana_client`], [`solana_sdk`], and [`anyhow`] crates.
-    ///
-    /// [`solana_address_lookup_table_program`]: https://docs.rs/solana-address-lookup-table-program
-    /// [`solana_client`]: https://docs.rs/solana-client
-    /// [`solana_sdk`]: https://docs.rs/solana-sdk
-    /// [`anyhow`]: https://docs.rs/anyhow
-    ///
-    /// ```
-    /// # use solana_program::example_mocks::{
-    /// #     solana_address_lookup_table_program,
-    /// #     solana_client,
-    /// #     solana_sdk,
-    /// # };
-    /// # use std::borrow::Cow;
-    /// # use solana_sdk::account::Account;
-    /// use anyhow::Result;
-    /// use solana_address_lookup_table_program::state::AddressLookupTable;
-    /// use solana_client::rpc_client::RpcClient;
-    /// use solana_sdk::{
-    ///      address_lookup_table_account::AddressLookupTableAccount,
-    ///      instruction::{AccountMeta, Instruction},
-    ///      message::{VersionedMessage, v0},
-    ///      pubkey::Pubkey,
-    ///      signature::{Keypair, Signer},
-    ///      transaction::VersionedTransaction,
-    /// };
-    ///
-    /// fn create_tx_with_address_table_lookup(
-    ///     client: &RpcClient,
-    ///     instruction: Instruction,
-    ///     address_lookup_table_key: Pubkey,
-    ///     payer: &Keypair,
-    /// ) -> Result<VersionedTransaction> {
-    ///     # client.set_get_account_response(address_lookup_table_key, Account {
-    ///     #   lamports: 1,
-    ///     #   data: AddressLookupTable {
-    ///     #     addresses: Cow::Owned(instruction.accounts.iter().map(|meta| meta.pubkey).collect()),
-    ///     #   }.serialize_for_tests().unwrap(),
-    ///     #   owner: solana_address_lookup_table_program::ID,
-    ///     #   executable: false,
-    ///     #   rent_epoch: 1,
-    ///     # });
-    ///     let raw_account = client.get_account(&address_lookup_table_key)?;
-    ///     let address_lookup_table = AddressLookupTable::deserialize(&raw_account.data)?;
-    ///     let address_lookup_table_account = AddressLookupTableAccount {
-    ///         key: address_lookup_table_key,
-    ///         addresses: address_lookup_table.addresses.to_vec(),
-    ///     };
-    ///
-    ///     let blockhash = client.get_latest_blockhash()?;
-    ///     let tx = VersionedTransaction::try_new(
-    ///         VersionedMessage::V0(v0::Message::try_compile(
-    ///             &payer.pubkey(),
-    ///             &[instruction],
-    ///             &[address_lookup_table_account],
-    ///             blockhash,
-    ///         )?),
-    ///         &[payer],
-    ///     )?;
-    ///
-    ///     # assert!(tx.message.address_table_lookups().unwrap().len() > 0);
-    ///     Ok(tx)
-    /// }
-    /// #
-    /// # let client = RpcClient::new(String::new());
-    /// # let payer = Keypair::new();
-    /// # let address_lookup_table_key = Pubkey::new_unique();
-    /// # let instruction = Instruction::new_with_bincode(Pubkey::new_unique(), &(), vec![
-    /// #   AccountMeta::new(Pubkey::new_unique(), false),
-    /// # ]);
-    /// # create_tx_with_address_table_lookup(&client, instruction, address_lookup_table_key, &payer)?;
-    /// # Ok::<(), anyhow::Error>(())
-    /// ```
-    pub fn try_compile(
-        payer: &Pubkey,
-        instructions: &[Instruction],
-        address_lookup_table_accounts: &[AddressLookupTableAccount],
-        recent_blockhash: Hash,
-    ) -> Result<Self, CompileError> {
-        let mut compiled_keys = CompiledKeys::compile(instructions, Some(*payer));
-
-        let mut address_table_lookups = Vec::with_capacity(address_lookup_table_accounts.len());
-        let mut loaded_addresses_list = Vec::with_capacity(address_lookup_table_accounts.len());
-        for lookup_table_account in address_lookup_table_accounts {
-            if let Some((lookup, loaded_addresses)) =
-                compiled_keys.try_extract_table_lookup(lookup_table_account)?
-            {
-                address_table_lookups.push(lookup);
-                loaded_addresses_list.push(loaded_addresses);
-            }
-        }
-
-        let (header, static_keys) = compiled_keys.try_into_message_components()?;
-        let dynamic_keys = loaded_addresses_list.into_iter().collect();
-        let account_keys = AccountKeys::new(&static_keys, Some(&dynamic_keys));
-        let instructions = account_keys.try_compile_instructions(instructions)?;
-
-        Ok(Self {
-            header,
-            account_keys: static_keys,
-            recent_blockhash,
-            instructions,
-            address_table_lookups,
-        })
-    }
-
     /// Serialize this message with a version #0 prefix using bincode encoding.
     pub fn serialize(&self) -> Vec<u8> {
         bincode::serialize(&(MESSAGE_VERSION_PREFIX, self)).unwrap()
@@ -322,10 +242,7 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
-    use {
-        super::*,
-        crate::{instruction::AccountMeta, message::VersionedMessage},
-    };
+    use {super::*, crate::message::VersionedMessage};
 
     #[test]
     fn test_sanitize() {
@@ -337,7 +254,9 @@ mod tests {
             account_keys: vec![Pubkey::new_unique()],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
@@ -356,7 +275,9 @@ mod tests {
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
@@ -375,13 +296,15 @@ mod tests {
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
     #[test]
-    fn test_sanitize_with_table_lookup_and_ix() {
-        assert!(Message {
+    fn test_sanitize_with_table_lookup_and_ix_with_dynamic_program_id() {
+        let message = Message {
             header: MessageHeader {
                 num_required_signatures: 1,
                 ..MessageHeader::default()
@@ -395,11 +318,43 @@ mod tests {
             instructions: vec![CompiledInstruction {
                 program_id_index: 4,
                 accounts: vec![0, 1, 2, 3],
+                data: vec![],
+            }],
+            ..Message::default()
+        };
+
+        assert!(message.sanitize(
+            false, // require_static_program_ids
+        ).is_ok());
+
+        assert!(message.sanitize(
+            true, // require_static_program_ids
+        ).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_with_table_lookup_and_ix_with_static_program_id() {
+        assert!(Message {
+            header: MessageHeader {
+                num_required_signatures: 1,
+                ..MessageHeader::default()
+            },
+            account_keys: vec![Pubkey::new_unique(), Pubkey::new_unique()],
+            address_table_lookups: vec![MessageAddressTableLookup {
+                account_key: Pubkey::new_unique(),
+                writable_indexes: vec![1, 2, 3],
+                readonly_indexes: vec![0],
+            }],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                accounts: vec![2, 3, 4, 5],
                 data: vec![]
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
@@ -410,7 +365,9 @@ mod tests {
             account_keys: vec![Pubkey::new_unique()],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
 
@@ -425,7 +382,9 @@ mod tests {
             account_keys: vec![Pubkey::new_unique()],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
 
@@ -444,7 +403,9 @@ mod tests {
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
 
@@ -458,7 +419,9 @@ mod tests {
             account_keys: (0..=u8::MAX).map(|_| Pubkey::new_unique()).collect(),
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
@@ -472,7 +435,9 @@ mod tests {
             account_keys: (0..=256).map(|_| Pubkey::new_unique()).collect(),
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
 
@@ -491,7 +456,9 @@ mod tests {
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_ok());
     }
 
@@ -510,13 +477,15 @@ mod tests {
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
 
     #[test]
     fn test_sanitize_with_invalid_ix_program_id() {
-        assert!(Message {
+        let message = Message {
             header: MessageHeader {
                 num_required_signatures: 1,
                 ..MessageHeader::default()
@@ -530,12 +499,17 @@ mod tests {
             instructions: vec![CompiledInstruction {
                 program_id_index: 2,
                 accounts: vec![],
-                data: vec![]
+                data: vec![],
             }],
             ..Message::default()
-        }
-        .sanitize()
-        .is_err());
+        };
+
+        assert!(message
+            .sanitize(true /* require_static_program_ids */)
+            .is_err());
+        assert!(message
+            .sanitize(false /* require_static_program_ids */)
+            .is_err());
     }
 
     #[test]
@@ -545,7 +519,7 @@ mod tests {
                 num_required_signatures: 1,
                 ..MessageHeader::default()
             },
-            account_keys: vec![Pubkey::new_unique()],
+            account_keys: vec![Pubkey::new_unique(), Pubkey::new_unique()],
             address_table_lookups: vec![MessageAddressTableLookup {
                 account_key: Pubkey::new_unique(),
                 writable_indexes: vec![],
@@ -553,79 +527,20 @@ mod tests {
             }],
             instructions: vec![CompiledInstruction {
                 program_id_index: 1,
-                accounts: vec![2],
+                accounts: vec![3],
                 data: vec![]
             }],
             ..Message::default()
         }
-        .sanitize()
+        .sanitize(
+            true, // require_static_program_ids
+        )
         .is_err());
     }
-
     #[test]
     fn test_serialize() {
         let message = Message::default();
         let versioned_msg = VersionedMessage::V0(message.clone());
         assert_eq!(message.serialize(), versioned_msg.serialize());
-    }
-
-    #[test]
-    fn test_try_compile() {
-        let mut keys = vec![];
-        keys.resize_with(8, Pubkey::new_unique);
-
-        let payer = keys[0];
-        let program_id = keys[7];
-        let instructions = vec![Instruction {
-            program_id,
-            accounts: vec![
-                AccountMeta::new(keys[1], true),
-                AccountMeta::new_readonly(keys[2], true),
-                AccountMeta::new(keys[3], false),
-                AccountMeta::new_readonly(keys[4], false),
-                AccountMeta::new(keys[5], false),
-                AccountMeta::new_readonly(keys[6], false),
-            ],
-            data: vec![],
-        }];
-        let address_lookup_table_accounts = vec![
-            AddressLookupTableAccount {
-                key: Pubkey::new_unique(),
-                addresses: vec![keys[5], keys[6], program_id],
-            },
-            AddressLookupTableAccount {
-                key: Pubkey::new_unique(),
-                addresses: vec![],
-            },
-        ];
-
-        let recent_blockhash = Hash::new_unique();
-        assert_eq!(
-            Message::try_compile(
-                &payer,
-                &instructions,
-                &address_lookup_table_accounts,
-                recent_blockhash
-            ),
-            Ok(Message {
-                header: MessageHeader {
-                    num_required_signatures: 3,
-                    num_readonly_signed_accounts: 1,
-                    num_readonly_unsigned_accounts: 1
-                },
-                recent_blockhash,
-                account_keys: vec![keys[0], keys[1], keys[2], keys[3], keys[4]],
-                instructions: vec![CompiledInstruction {
-                    program_id_index: 7,
-                    accounts: vec![1, 2, 3, 4, 5, 6],
-                    data: vec![],
-                },],
-                address_table_lookups: vec![MessageAddressTableLookup {
-                    account_key: address_lookup_table_accounts[0].key,
-                    writable_indexes: vec![0],
-                    readonly_indexes: vec![1, 2],
-                }],
-            })
-        );
     }
 }

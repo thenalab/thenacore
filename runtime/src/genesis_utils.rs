@@ -21,7 +21,7 @@ const VALIDATOR_LAMPORTS: u64 = 42;
 
 // fun fact: rustc is very close to make this const fn.
 pub fn bootstrap_validator_stake_lamports() -> u64 {
-    Rent::default().minimum_balance(StakeState::size_of())
+    StakeState::get_rent_exempt_reserve(&Rent::default())
 }
 
 // Number of lamports automatically used for genesis accounts
@@ -75,15 +75,7 @@ pub struct GenesisConfigInfo {
 }
 
 pub fn create_genesis_config(mint_lamports: u64) -> GenesisConfigInfo {
-    // Note that zero lamports for validator stake will result in stake account
-    // not being stored in accounts-db but still cached in bank stakes. This
-    // causes discrepancy between cached stakes accounts in bank and
-    // accounts-db which in particular will break snapshots test.
-    create_genesis_config_with_leader(
-        mint_lamports,
-        &solana_sdk::pubkey::new_rand(), // validator_pubkey
-        0,                               // validator_stake_lamports
-    )
+    create_genesis_config_with_leader(mint_lamports, &solana_sdk::pubkey::new_rand(), 0)
 }
 
 pub fn create_genesis_config_with_vote_accounts(

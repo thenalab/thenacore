@@ -105,11 +105,7 @@ export function TransactionDetailsPage({ signature: raw }: SignatureProps) {
       ) : (
         <SignatureContext.Provider value={signature}>
           <StatusCard signature={signature} autoRefresh={autoRefresh} />
-          <React.Suspense
-            fallback={<LoadingCard message="Loading transaction details" />}
-          >
-            <DetailsSection signature={signature} />
-          </React.Suspense>
+          <DetailsSection signature={signature} />
         </SignatureContext.Provider>
       )}
     </div>
@@ -274,7 +270,7 @@ function StatusCard({
         </tr>
 
         <tr>
-          <td>Slot</td>
+          <td>Block</td>
           <td className="text-lg-end">
             <Slot slot={info.slot} link />
           </td>

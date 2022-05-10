@@ -6,7 +6,6 @@ use {
     },
     solana_sdk::{
         deserialize_utils::default_on_eof, message::v0::LoadedAddresses, transaction::Result,
-        transaction_context::TransactionReturnData,
     },
     solana_transaction_status::{
         InnerInstructions, Reward, RewardType, TransactionStatusMeta, TransactionTokenBalance,
@@ -116,8 +115,6 @@ pub struct StoredTransactionTokenBalance {
     pub ui_token_amount: StoredTokenAmount,
     #[serde(deserialize_with = "default_on_eof")]
     pub owner: String,
-    #[serde(deserialize_with = "default_on_eof")]
-    pub program_id: String,
 }
 
 impl From<StoredTransactionTokenBalance> for TransactionTokenBalance {
@@ -127,14 +124,12 @@ impl From<StoredTransactionTokenBalance> for TransactionTokenBalance {
             mint,
             ui_token_amount,
             owner,
-            program_id,
         } = value;
         Self {
             account_index,
             mint,
             ui_token_amount: ui_token_amount.into(),
             owner,
-            program_id,
         }
     }
 }
@@ -146,14 +141,12 @@ impl From<TransactionTokenBalance> for StoredTransactionTokenBalance {
             mint,
             ui_token_amount,
             owner,
-            program_id,
         } = value;
         Self {
             account_index,
             mint,
             ui_token_amount: ui_token_amount.into(),
             owner,
-            program_id,
         }
     }
 }
@@ -174,8 +167,6 @@ pub struct StoredTransactionStatusMeta {
     pub post_token_balances: Option<Vec<StoredTransactionTokenBalance>>,
     #[serde(deserialize_with = "default_on_eof")]
     pub rewards: Option<Vec<StoredExtendedReward>>,
-    #[serde(deserialize_with = "default_on_eof")]
-    pub return_data: Option<TransactionReturnData>,
 }
 
 impl From<StoredTransactionStatusMeta> for TransactionStatusMeta {
@@ -190,7 +181,6 @@ impl From<StoredTransactionStatusMeta> for TransactionStatusMeta {
             pre_token_balances,
             post_token_balances,
             rewards,
-            return_data,
         } = value;
         Self {
             status,
@@ -206,7 +196,6 @@ impl From<StoredTransactionStatusMeta> for TransactionStatusMeta {
             rewards: rewards
                 .map(|rewards| rewards.into_iter().map(|reward| reward.into()).collect()),
             loaded_addresses: LoadedAddresses::default(),
-            return_data,
         }
     }
 }
@@ -225,7 +214,6 @@ impl TryFrom<TransactionStatusMeta> for StoredTransactionStatusMeta {
             post_token_balances,
             rewards,
             loaded_addresses,
-            return_data,
         } = value;
 
         if !loaded_addresses.is_empty() {
@@ -249,7 +237,6 @@ impl TryFrom<TransactionStatusMeta> for StoredTransactionStatusMeta {
                 .map(|balances| balances.into_iter().map(|balance| balance.into()).collect()),
             rewards: rewards
                 .map(|rewards| rewards.into_iter().map(|reward| reward.into()).collect()),
-            return_data,
         })
     }
 }

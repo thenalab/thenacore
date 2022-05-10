@@ -592,8 +592,8 @@ mod tests {
             bank_forks::BankForks,
             commitment::{BlockCommitmentCache, CommitmentSlots},
             genesis_utils::{
-                activate_all_features, create_genesis_config,
-                create_genesis_config_with_vote_accounts, GenesisConfigInfo, ValidatorVoteKeypairs,
+                create_genesis_config, create_genesis_config_with_vote_accounts, GenesisConfigInfo,
+                ValidatorVoteKeypairs,
             },
             vote_transaction::VoteTransaction,
         },
@@ -604,11 +604,10 @@ mod tests {
             hash::Hash,
             message::Message,
             pubkey::Pubkey,
-            rent::Rent,
             signature::{Keypair, Signer},
             stake::{
                 self, instruction as stake_instruction,
-                state::{Authorized, Lockup, StakeAuthorize, StakeState},
+                state::{Authorized, Lockup, StakeAuthorize},
             },
             system_instruction, system_program, system_transaction,
             transaction::{self, Transaction},
@@ -826,12 +825,10 @@ mod tests {
     #[serial]
     fn test_account_subscribe() {
         let GenesisConfigInfo {
-            mut genesis_config,
+            genesis_config,
             mint_keypair: alice,
             ..
-        } = create_genesis_config(10_000_000_000);
-        genesis_config.rent = Rent::default();
-        activate_all_features(&mut genesis_config);
+        } = create_genesis_config(10_000);
 
         let new_stake_authority = solana_sdk::pubkey::new_rand();
         let stake_authority = Keypair::new();
@@ -875,21 +872,16 @@ mod tests {
         rpc_subscriptions.notify_slot(1, 0, 0);
         receiver2.recv();
 
-        let balance = {
-            let bank = bank_forks.read().unwrap().working_bank();
-            let rent = &bank.rent_collector().rent;
-            rent.minimum_balance(StakeState::size_of())
-        };
-
-        let tx = system_transaction::transfer(&alice, &from.pubkey(), balance, blockhash);
+        let tx = system_transaction::transfer(&alice, &from.pubkey(), 51, blockhash);
         process_transaction_and_notify(&bank_forks, &tx, &rpc_subscriptions, 1).unwrap();
+
         let authorized = Authorized::auto(&stake_authority.pubkey());
         let ixs = stake_instruction::create_account(
             &from.pubkey(),
             &stake_account.pubkey(),
             &authorized,
             &Lockup::default(),
-            balance,
+            51,
         );
         let message = Message::new(&ixs, Some(&from.pubkey()));
         let tx = Transaction::new(&[&from, &stake_account], message, blockhash);
@@ -912,7 +904,7 @@ mod tests {
                    "context": { "slot": 1 },
                    "value": {
                        "owner": stake_program_id.to_string(),
-                       "lamports": balance,
+                       "lamports": 51,
                        "data": [base64::encode(expected_data), encoding],
                        "executable": false,
                        "rentEpoch": 0,
@@ -928,13 +920,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&response).unwrap(),
         );
 
-        let balance = {
-            let bank = bank_forks.read().unwrap().working_bank();
-            let rent = &bank.rent_collector().rent;
-            rent.minimum_balance(0)
-        };
-        let tx =
-            system_transaction::transfer(&alice, &stake_authority.pubkey(), balance, blockhash);
+        let tx = system_transaction::transfer(&alice, &stake_authority.pubkey(), 1, blockhash);
         process_transaction_and_notify(&bank_forks, &tx, &rpc_subscriptions, 1).unwrap();
         sleep(Duration::from_millis(200));
         let ix = stake_instruction::authorize(

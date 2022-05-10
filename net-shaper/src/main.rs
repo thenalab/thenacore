@@ -1,6 +1,9 @@
 #![allow(clippy::integer_arithmetic)]
 use {
-    clap::{crate_description, crate_name, crate_version, Arg, ArgMatches, Command},
+    clap::{
+        crate_description, crate_name, crate_version, value_t, value_t_or_exit, App, Arg,
+        ArgMatches, SubCommand,
+    },
     rand::{thread_rng, Rng},
     serde::{Deserialize, Serialize},
     std::{fs, io, path::PathBuf},
@@ -366,13 +369,13 @@ fn partition_id_to_tos(partition: usize) -> u8 {
 }
 
 fn shape_network(matches: &ArgMatches) {
-    let config_path = PathBuf::from(matches.value_of_t_or_exit::<String>("file"));
+    let config_path = PathBuf::from(value_t_or_exit!(matches, "file", String));
     let config = fs::read_to_string(&config_path).expect("Unable to read config file");
     let topology: NetworkTopology =
         serde_json::from_str(&config).expect("Failed to parse log as JSON");
-    let interface: String = matches.value_of_t_or_exit("iface");
-    let network_size: u64 = matches.value_of_t_or_exit("size");
-    let my_index: u64 = matches.value_of_t_or_exit("position");
+    let interface = value_t_or_exit!(matches, "iface", String);
+    let network_size = value_t_or_exit!(matches, "size", u64);
+    let my_index = value_t_or_exit!(matches, "position", u64);
     if !shape_network_steps(&topology, &interface, network_size, my_index) {
         delete_ifb(interface.as_str());
         flush_iptables_rule();
@@ -468,9 +471,9 @@ fn configure(matches: &ArgMatches) {
     let config = if !matches.is_present("random") {
         NetworkTopology::new_from_stdin()
     } else {
-        let max_partitions: usize = matches.value_of_t("max-partitions").unwrap_or(4);
-        let max_drop: u8 = matches.value_of_t("max-drop").unwrap_or(100);
-        let max_delay: u32 = matches.value_of_t("max-delay").unwrap_or(50);
+        let max_partitions = value_t!(matches, "max-partitions", usize).unwrap_or(4);
+        let max_drop = value_t!(matches, "max-drop", u8).unwrap_or(100);
+        let max_delay = value_t!(matches, "max-delay", u32).unwrap_or(50);
         NetworkTopology::new_random(max_partitions, max_drop, max_delay)
     };
 
@@ -484,15 +487,15 @@ fn configure(matches: &ArgMatches) {
 fn main() {
     solana_logger::setup();
 
-    let matches = Command::new(crate_name!())
+    let matches = App::new(crate_name!())
         .about(crate_description!())
         .version(crate_version!())
         .subcommand(
-            Command::new("shape")
+            SubCommand::with_name("shape")
                 .about("Shape the network using config file")
                 .arg(
-                    Arg::new("file")
-                        .short('f')
+                    Arg::with_name("file")
+                        .short("f")
                         .long("file")
                         .value_name("config file")
                         .takes_value(true)
@@ -500,8 +503,8 @@ fn main() {
                         .help("Location of the network config file"),
                 )
                 .arg(
-                    Arg::new("size")
-                        .short('s')
+                    Arg::with_name("size")
+                        .short("s")
                         .long("size")
                         .value_name("network size")
                         .takes_value(true)
@@ -509,8 +512,8 @@ fn main() {
                         .help("Number of nodes in the network"),
                 )
                 .arg(
-                    Arg::new("iface")
-                        .short('i')
+                    Arg::with_name("iface")
+                        .short("i")
                         .long("iface")
                         .value_name("network interface name")
                         .takes_value(true)
@@ -518,8 +521,8 @@ fn main() {
                         .help("Name of network interface"),
                 )
                 .arg(
-                    Arg::new("position")
-                        .short('p')
+                    Arg::with_name("position")
+                        .short("p")
                         .long("position")
                         .value_name("position of node")
                         .takes_value(true)
@@ -528,11 +531,11 @@ fn main() {
                 ),
         )
         .subcommand(
-            Command::new("cleanup")
+            SubCommand::with_name("cleanup")
                 .about("Remove the network filters using config file")
                 .arg(
-                    Arg::new("file")
-                        .short('f')
+                    Arg::with_name("file")
+                        .short("f")
                         .long("file")
                         .value_name("config file")
                         .takes_value(true)
@@ -540,8 +543,8 @@ fn main() {
                         .help("Location of the network config file"),
                 )
                 .arg(
-                    Arg::new("size")
-                        .short('s')
+                    Arg::with_name("size")
+                        .short("s")
                         .long("size")
                         .value_name("network size")
                         .takes_value(true)
@@ -549,8 +552,8 @@ fn main() {
                         .help("Number of nodes in the network"),
                 )
                 .arg(
-                    Arg::new("iface")
-                        .short('i')
+                    Arg::with_name("iface")
+                        .short("i")
                         .long("iface")
                         .value_name("network interface name")
                         .takes_value(true)
@@ -558,8 +561,8 @@ fn main() {
                         .help("Name of network interface"),
                 )
                 .arg(
-                    Arg::new("position")
-                        .short('p')
+                    Arg::with_name("position")
+                        .short("p")
                         .long("position")
                         .value_name("position of node")
                         .takes_value(true)
@@ -568,18 +571,18 @@ fn main() {
                 ),
         )
         .subcommand(
-            Command::new("configure")
+            SubCommand::with_name("configure")
                 .about("Generate a config file")
                 .arg(
-                    Arg::new("random")
-                        .short('r')
+                    Arg::with_name("random")
+                        .short("r")
                         .long("random")
                         .required(false)
                         .help("Generate a random config file"),
                 )
                 .arg(
-                    Arg::new("max-partitions")
-                        .short('p')
+                    Arg::with_name("max-partitions")
+                        .short("p")
                         .long("max-partitions")
                         .value_name("count")
                         .takes_value(true)
@@ -587,8 +590,8 @@ fn main() {
                         .help("Maximum number of partitions. Used only with random configuration generation"),
                 )
                 .arg(
-                    Arg::new("max-drop")
-                        .short('d')
+                    Arg::with_name("max-drop")
+                        .short("d")
                         .long("max-drop")
                         .value_name("percentage")
                         .takes_value(true)
@@ -596,8 +599,8 @@ fn main() {
                         .help("Maximum amount of packet drop. Used only with random configuration generation"),
                 )
                 .arg(
-                    Arg::new("max-delay")
-                        .short('y')
+                    Arg::with_name("max-delay")
+                        .short("y")
                         .long("max-delay")
                         .value_name("ms")
                         .takes_value(true)
@@ -608,13 +611,13 @@ fn main() {
         .get_matches();
 
     match matches.subcommand() {
-        Some(("shape", args_matches)) => shape_network(args_matches),
-        Some(("cleanup", args_matches)) => {
-            let interfaces: String = args_matches.value_of_t_or_exit("iface");
+        ("shape", Some(args_matches)) => shape_network(args_matches),
+        ("cleanup", Some(args_matches)) => {
+            let interfaces = value_t_or_exit!(args_matches, "iface", String);
             let iface = parse_interface(&interfaces);
             cleanup_network(iface)
         }
-        Some(("configure", args_matches)) => configure(args_matches),
+        ("configure", Some(args_matches)) => configure(args_matches),
         _ => {}
     };
 }

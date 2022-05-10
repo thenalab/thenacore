@@ -31,27 +31,27 @@ use {
     },
     solana_gossip::{cluster_info::Node, contact_info::ContactInfo},
     solana_ledger::blockstore_db::{
-        BlockstoreCompressionType, BlockstoreRecoveryMode, BlockstoreRocksFifoOptions,
-        LedgerColumnOptions, ShredStorageType, DEFAULT_ROCKS_FIFO_SHRED_STORAGE_SIZE_BYTES,
+        BlockstoreRecoveryMode, BlockstoreRocksFifoOptions, LedgerColumnOptions, ShredStorageType,
+        DEFAULT_ROCKS_FIFO_SHRED_STORAGE_SIZE_BYTES,
     },
     solana_net_utils::VALIDATOR_PORT_RANGE,
     solana_perf::recycler::enable_recycler_warming,
     solana_poh::poh_service,
+    solana_replica_lib::accountsdb_repl_server::AccountsDbReplServiceConfig,
     solana_rpc::{
         rpc::{JsonRpcConfig, RpcBigtableConfig},
         rpc_pubsub_service::PubSubConfig,
     },
     solana_runtime::{
         accounts_db::{
-            AccountShrinkThreshold, AccountsDbConfig, FillerAccountsConfig,
-            DEFAULT_ACCOUNTS_SHRINK_OPTIMIZE_TOTAL_SPACE, DEFAULT_ACCOUNTS_SHRINK_RATIO,
+            AccountShrinkThreshold, AccountsDbConfig, DEFAULT_ACCOUNTS_SHRINK_OPTIMIZE_TOTAL_SPACE,
+            DEFAULT_ACCOUNTS_SHRINK_RATIO,
         },
         accounts_index::{
             AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
-            AccountsIndexConfig, IndexLimitMb,
+            AccountsIndexConfig,
         },
         hardened_unpack::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
-        runtime_config::RuntimeConfig,
         snapshot_config::SnapshotConfig,
         snapshot_utils::{
             self, ArchiveFormat, SnapshotVersion, DEFAULT_FULL_SNAPSHOT_ARCHIVE_INTERVAL_SLOTS,
@@ -662,18 +662,8 @@ pub fn main() {
                 .long("enable-cpi-and-log-storage")
                 .requires("enable_rpc_transaction_history")
                 .takes_value(false)
-                .hidden(true)
-                .help("Deprecated, please use \"enable-extended-tx-metadata-storage\". \
-                       Include CPI inner instructions, logs and return data in \
-                       the historical transaction info stored"),
-        )
-        .arg(
-            Arg::with_name("enable_extended_tx_metadata_storage")
-                .long("enable-extended-tx-metadata-storage")
-                .requires("enable_rpc_transaction_history")
-                .takes_value(false)
-                .help("Include CPI inner instructions, logs, and return data in \
-                       the historical transaction info stored"),
+                .help("Include CPI inner instructions and logs in the \
+                        historical transaction info stored"),
         )
         .arg(
             Arg::with_name("rpc_max_multiple_accounts")
@@ -1016,30 +1006,6 @@ pub fn main() {
                 .default_value(default_rocksdb_fifo_shred_storage_size)
                 .help("The shred storage size in bytes. \
                        The suggested value is 50% of your ledger storage size in bytes."),
-        )
-        .arg(
-            Arg::with_name("rocksdb_ledger_compression")
-                .hidden(true)
-                .long("rocksdb-ledger-compression")
-                .value_name("COMPRESSION_TYPE")
-                .takes_value(true)
-                .possible_values(&["none", "lz4", "snappy", "zlib"])
-                .default_value("none")
-                .help("The compression alrogithm that is used to compress \
-                       transaction status data.  \
-                       Turning on compression can save ~10% of the ledger size."),
-        )
-        .arg(
-            Arg::with_name("rocksdb_perf_sample_interval")
-                .hidden(true)
-                .long("rocksdb-perf-sample-interval")
-                .value_name("ROCKS_PERF_SAMPLE_INTERVAL")
-                .takes_value(true)
-                .validator(is_parsable::<usize>)
-                .default_value("0")
-                .help("Controls how often RocksDB read/write performance sample is collected. \
-                       Reads/writes perf samples are collected in 1 / ROCKS_PERF_SAMPLE_INTERVAL sampling rate."),
-
         )
         .arg(
             Arg::with_name("skip_poh_verify")
@@ -1583,13 +1549,6 @@ pub fn main() {
                       This option is for use during testing."),
         )
         .arg(
-            Arg::with_name("accounts_db_skip_rewrites")
-                .long("accounts-db-skip-rewrites")
-                .help("Accounts that are rent exempt and have no changes are not rewritten. \
-                      This produces snapshots that older versions cannot read.")
-                      .hidden(true),
-        )
-        .arg(
             Arg::with_name("accounts_db_cache_limit_mb")
                 .long("accounts-db-cache-limit-mb")
                 .value_name("MEGABYTES")
@@ -1650,16 +1609,7 @@ pub fn main() {
             .value_name("COUNT")
             .validator(is_parsable::<usize>)
             .takes_value(true)
-            .default_value("0")
             .help("How many accounts to add to stress the system. Accounts are ignored in operations related to correctness."))
-         .arg(Arg::with_name("accounts_filler_size")
-            .long("accounts-filler-size")
-            .value_name("BYTES")
-            .validator(is_parsable::<usize>)
-            .takes_value(true)
-            .default_value("0")
-            .requires("accounts_filler_count")
-            .help("Size per filler account in bytes."))
          .arg(
             Arg::with_name("accounts_db_test_hash_calculation")
                 .long("accounts-db-test-hash-calculation")
@@ -1670,16 +1620,14 @@ pub fn main() {
             Arg::with_name("accounts_db_index_hashing")
                 .long("accounts-db-index-hashing")
                 .help("Enables the use of the index in hash calculation in \
-                       AccountsHashVerifier/Accounts Background Service.")
-                .hidden(true),
+                       AccountsHashVerifier/Accounts Background Service."),
         )
         .arg(
             Arg::with_name("no_accounts_db_index_hashing")
                 .long("no-accounts-db-index-hashing")
                 .help("This is obsolete. See --accounts-db-index-hashing. \
                        Disables the use of the index in hash calculation in \
-                       AccountsHashVerifier/Accounts Background Service.")
-                .hidden(true),
+                       AccountsHashVerifier/Accounts Background Service."),
         )
         .arg(
             // legacy nop argument
@@ -2283,14 +2231,11 @@ pub fn main() {
         accounts_index_config.bins = Some(bins);
     }
 
-    accounts_index_config.index_limit_mb =
-        if let Some(limit) = value_t!(matches, "accounts_index_memory_limit_mb", usize).ok() {
-            IndexLimitMb::Limit(limit)
-        } else if matches.is_present("disable_accounts_disk_index") {
-            IndexLimitMb::InMemOnly
-        } else {
-            IndexLimitMb::Unspecified
-        };
+    if let Some(limit) = value_t!(matches, "accounts_index_memory_limit_mb", usize).ok() {
+        accounts_index_config.index_limit_mb = Some(limit);
+    } else if matches.is_present("disable_accounts_disk_index") {
+        accounts_index_config.index_limit_mb = None;
+    }
 
     {
         let mut accounts_index_paths: Vec<PathBuf> = if matches.is_present("accounts_index_path") {
@@ -2313,19 +2258,14 @@ pub fn main() {
             .ok()
             .map(|mb| mb * MB);
 
-    let filler_accounts_config = FillerAccountsConfig {
-        count: value_t_or_exit!(matches, "accounts_filler_count", usize),
-        size: value_t_or_exit!(matches, "accounts_filler_size", usize),
-    };
-
+    let filler_account_count = value_t!(matches, "accounts_filler_count", usize).ok();
     let mut accounts_db_config = AccountsDbConfig {
         index: Some(accounts_index_config),
         accounts_hash_cache_path: Some(ledger_path.clone()),
-        filler_accounts_config,
+        filler_account_count,
         write_cache_limit_bytes: value_t!(matches, "accounts_db_cache_limit_mb", u64)
             .ok()
             .map(|mb| mb * MB as u64),
-        skip_rewrites: matches.is_present("accounts_db_skip_rewrites"),
         ..AccountsDbConfig::default()
     };
 
@@ -2333,6 +2273,26 @@ pub fn main() {
         accounts_db_config.hash_calc_num_passes = Some(passes);
     }
     let accounts_db_config = Some(accounts_db_config);
+
+    let accountsdb_repl_service_config = if matches.is_present("enable_accountsdb_repl") {
+        let accountsdb_repl_bind_address = if matches.is_present("accountsdb_repl_bind_address") {
+            solana_net_utils::parse_host(matches.value_of("accountsdb_repl_bind_address").unwrap())
+                .expect("invalid accountsdb_repl_bind_address")
+        } else {
+            bind_address
+        };
+        let accountsdb_repl_port = value_t_or_exit!(matches, "accountsdb_repl_port", u16);
+
+        Some(AccountsDbReplServiceConfig {
+            worker_threads: value_t_or_exit!(matches, "accountsdb_repl_threads", usize),
+            replica_server_addr: SocketAddr::new(
+                accountsdb_repl_bind_address,
+                accountsdb_repl_port,
+            ),
+        })
+    } else {
+        None
+    };
 
     let geyser_plugin_config_files = if matches.is_present("geyser_plugin_config") {
         Some(
@@ -2346,15 +2306,7 @@ pub fn main() {
     };
 
     if matches.is_present("minimal_rpc_api") {
-        warn!("--minimal-rpc-api is now the default behavior. This flag is deprecated and can be removed from the launch args");
-    }
-
-    if matches.is_present("enable_cpi_and_log_storage") {
-        warn!(
-            "--enable-cpi-and-log-storage is deprecated. Please update the \
-            launch args to use --enable-extended-tx-metadata-storage and remove \
-            --enable-cpi-and-log-storage"
-        );
+        warn!("--minimal-rpc-api is now the default behavior. This flag is deprecated and can be removed from the launch args")
     }
 
     let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage")
@@ -2371,12 +2323,6 @@ pub fn main() {
         None
     };
 
-    if matches.is_present("accounts_db_index_hashing") {
-        info!("The accounts hash is only calculated without using the index. --accounts-db-index-hashing is deprecated and can be removed from the command line");
-    }
-    if matches.is_present("no_accounts_db_index_hashing") {
-        info!("The accounts hash is only calculated without using the index. --no-accounts-db-index-hashing is deprecated and can be removed from the command line");
-    }
     let rpc_send_retry_rate_ms = value_t_or_exit!(matches, "rpc_send_transaction_retry_ms", u64);
     let rpc_send_batch_size = value_t_or_exit!(matches, "rpc_send_transaction_batch_size", usize);
     let rpc_send_batch_send_rate_ms =
@@ -2405,7 +2351,7 @@ pub fn main() {
     let mut validator_config = ValidatorConfig {
         require_tower: matches.is_present("require_tower"),
         tower_storage,
-        halt_at_slot: value_t!(matches, "dev_halt_at_slot", Slot).ok(),
+        dev_halt_at_slot: value_t!(matches, "dev_halt_at_slot", Slot).ok(),
         expected_genesis_hash: matches
             .value_of("expected_genesis_hash")
             .map(|s| Hash::from_str(s).unwrap()),
@@ -2416,8 +2362,7 @@ pub fn main() {
         new_hard_forks: hardforks_of(&matches, "hard_forks"),
         rpc_config: JsonRpcConfig {
             enable_rpc_transaction_history: matches.is_present("enable_rpc_transaction_history"),
-            enable_extended_tx_metadata_storage: matches.is_present("enable_cpi_and_log_storage")
-                || matches.is_present("enable_extended_tx_metadata_storage"),
+            enable_cpi_and_log_storage: matches.is_present("enable_cpi_and_log_storage"),
             rpc_bigtable_config,
             faucet_addr: matches.value_of("rpc_faucet_addr").map(|address| {
                 solana_net_utils::parse_host_port(address).expect("failed to parse faucet address")
@@ -2439,6 +2384,7 @@ pub fn main() {
             account_indexes: account_indexes.clone(),
             rpc_scan_and_fix_roots: matches.is_present("rpc_scan_and_fix_roots"),
         },
+        accountsdb_repl_service_config,
         geyser_plugin_config_files,
         rpc_addrs: value_t!(matches, "rpc_port", u16).ok().map(|rpc_port| {
             (
@@ -2482,6 +2428,7 @@ pub fn main() {
         poh_verify: !matches.is_present("skip_poh_verify"),
         debug_keys,
         contact_debug_interval,
+        bpf_jit: !matches.is_present("no_bpf_jit"),
         send_transaction_service_config: send_transaction_service::Config {
             retry_rate_ms: rpc_send_retry_rate_ms,
             leader_forward_count: value_t_or_exit!(
@@ -2516,13 +2463,10 @@ pub fn main() {
         accounts_db_test_hash_calculation: matches.is_present("accounts_db_test_hash_calculation"),
         accounts_db_config,
         accounts_db_skip_shrink: matches.is_present("accounts_db_skip_shrink"),
+        accounts_db_use_index_hash_calculation: matches.is_present("accounts_db_index_hashing"),
         tpu_coalesce_ms,
         no_wait_for_vote_to_start_leader: matches.is_present("no_wait_for_vote_to_start_leader"),
         accounts_shrink_ratio,
-        runtime_config: RuntimeConfig {
-            bpf_jit: !matches.is_present("no_bpf_jit"),
-            ..RuntimeConfig::default()
-        },
         ..ValidatorConfig::default()
     };
 
@@ -2662,6 +2606,7 @@ pub fn main() {
         snapshot_version,
         maximum_full_snapshot_archives_to_retain,
         maximum_incremental_snapshot_archives_to_retain,
+        accounts_hash_use_index: validator_config.accounts_db_use_index_hash_calculation,
         accounts_hash_debug_verify: validator_config.accounts_db_test_hash_calculation,
         packager_thread_niceness_adj: snapshot_packager_niceness_adj,
     });
@@ -2707,19 +2652,6 @@ pub fn main() {
     }
 
     validator_config.ledger_column_options = LedgerColumnOptions {
-        compression_type: match matches.value_of("rocksdb_ledger_compression") {
-            None => BlockstoreCompressionType::default(),
-            Some(ledger_compression_string) => match ledger_compression_string {
-                "none" => BlockstoreCompressionType::None,
-                "snappy" => BlockstoreCompressionType::Snappy,
-                "lz4" => BlockstoreCompressionType::Lz4,
-                "zlib" => BlockstoreCompressionType::Zlib,
-                _ => panic!(
-                    "Unsupported ledger_compression: {}",
-                    ledger_compression_string
-                ),
-            },
-        },
         shred_storage_type: match matches.value_of("rocksdb_shred_compaction") {
             None => ShredStorageType::default(),
             Some(shred_compaction_string) => match shred_compaction_string {
@@ -2738,12 +2670,6 @@ pub fn main() {
                 ),
             },
         },
-        rocks_perf_sample_interval: value_t_or_exit!(
-            matches,
-            "rocksdb_perf_sample_interval",
-            usize
-        ),
-        ..LedgerColumnOptions::default()
     };
 
     if matches.is_present("halt_on_known_validators_accounts_hash_mismatch") {

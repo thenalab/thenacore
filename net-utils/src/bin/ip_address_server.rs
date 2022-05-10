@@ -1,14 +1,14 @@
 use {
-    clap::{Arg, Command},
+    clap::{App, Arg},
     std::net::{SocketAddr, TcpListener},
 };
 
 fn main() {
     solana_logger::setup();
-    let matches = Command::new("solana-ip-address-server")
+    let matches = App::new("solana-ip-address-server")
         .version(solana_version::version!())
         .arg(
-            Arg::new("port")
+            Arg::with_name("port")
                 .index(1)
                 .required(true)
                 .help("TCP port to bind to"),

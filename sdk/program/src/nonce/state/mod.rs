@@ -1,5 +1,3 @@
-//! State for durable transaction nonces.
-
 mod current;
 pub use current::{Data, State};
 use serde_derive::{Deserialize, Serialize};

@@ -1,8 +1,11 @@
 use {
     itertools::Itertools,
-    serde::ser::{Serialize, Serializer},
+    serde::{
+        de::{Deserialize, Deserializer},
+        ser::{Serialize, Serializer},
+    },
     solana_sdk::{
-        account::{accounts_equal, Account, AccountSharedData, ReadableAccount},
+        account::{Account, AccountSharedData, ReadableAccount},
         instruction::InstructionError,
         pubkey::Pubkey,
     },
@@ -20,8 +23,7 @@ use {
 const INVALID_VOTE_STATE: Result<VoteState, InstructionError> =
     Err(InstructionError::InvalidAccountData);
 
-#[derive(Clone, Debug, Default, PartialEq, AbiExample, Deserialize)]
-#[serde(from = "Account")]
+#[derive(Clone, Debug, Default, PartialEq, AbiExample)]
 pub struct VoteAccount(Arc<VoteAccountInner>);
 
 #[derive(Debug, AbiExample)]
@@ -33,8 +35,7 @@ struct VoteAccountInner {
 
 pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
 
-#[derive(Debug, AbiExample, Deserialize)]
-#[serde(from = "Arc<VoteAccountsHashMap>")]
+#[derive(Debug, AbiExample)]
 pub struct VoteAccounts {
     vote_accounts: Arc<VoteAccountsHashMap>,
     // Inner Arc is meant to implement copy-on-write semantics as opposed to
@@ -53,10 +54,6 @@ pub struct VoteAccounts {
 impl VoteAccount {
     pub(crate) fn lamports(&self) -> u64 {
         self.0.account.lamports()
-    }
-
-    pub(crate) fn owner(&self) -> &Pubkey {
-        self.0.account.owner()
     }
 
     pub fn vote_state(&self) -> RwLockReadGuard<Result<VoteState, InstructionError>> {
@@ -79,10 +76,6 @@ impl VoteAccount {
 }
 
 impl VoteAccounts {
-    pub(crate) fn len(&self) -> usize {
-        self.vote_accounts.len()
-    }
-
     pub fn staked_nodes(&self) -> Arc<HashMap<Pubkey, u64>> {
         self.staked_nodes_once.call_once(|| {
             let staked_nodes = self
@@ -187,15 +180,19 @@ impl Serialize for VoteAccount {
     }
 }
 
-impl From<AccountSharedData> for VoteAccount {
-    fn from(account: AccountSharedData) -> Self {
-        Self::from(Account::from(account))
+impl<'de> Deserialize<'de> for VoteAccount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let account = Account::deserialize(deserializer)?;
+        Ok(Self::from(account))
     }
 }
 
-impl From<VoteAccount> for AccountSharedData {
-    fn from(account: VoteAccount) -> Self {
-        Self::from(account.0.account.clone())
+impl From<AccountSharedData> for VoteAccount {
+    fn from(account: AccountSharedData) -> Self {
+        Self::from(Account::from(account))
     }
 }
 
@@ -227,18 +224,7 @@ impl Default for VoteAccountInner {
 
 impl PartialEq<VoteAccountInner> for VoteAccountInner {
     fn eq(&self, other: &Self) -> bool {
-        let Self {
-            account,
-            vote_state: _,
-            vote_state_once: _,
-        } = self;
-        account == &other.account
-    }
-}
-
-impl PartialEq<AccountSharedData> for VoteAccount {
-    fn eq(&self, other: &AccountSharedData) -> bool {
-        accounts_equal(&self.0.account, other)
+        self.account == other.account
     }
 }
 
@@ -275,12 +261,7 @@ impl Clone for VoteAccounts {
 
 impl PartialEq<VoteAccounts> for VoteAccounts {
     fn eq(&self, other: &Self) -> bool {
-        let Self {
-            vote_accounts,
-            staked_nodes: _,
-            staked_nodes_once: _,
-        } = self;
-        vote_accounts == &other.vote_accounts
+        self.vote_accounts == other.vote_accounts
     }
 }
 
@@ -321,6 +302,16 @@ impl Serialize for VoteAccounts {
         S: Serializer,
     {
         self.vote_accounts.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for VoteAccounts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vote_accounts = VoteAccountsHashMap::deserialize(deserializer)?;
+        Ok(Self::from(Arc::new(vote_accounts)))
     }
 }
 
@@ -453,7 +444,7 @@ mod tests {
     #[test]
     fn test_vote_accounts_serialize() {
         let mut rng = rand::thread_rng();
-        let vote_accounts_hash_map: VoteAccountsHashMap =
+        let vote_accounts_hash_map: HashMap<Pubkey, (u64, VoteAccount)> =
             new_rand_vote_accounts(&mut rng, 64).take(1024).collect();
         let vote_accounts = VoteAccounts::from(Arc::new(vote_accounts_hash_map.clone()));
         assert!(vote_accounts.staked_nodes().len() > 32);
@@ -472,7 +463,7 @@ mod tests {
     #[test]
     fn test_vote_accounts_deserialize() {
         let mut rng = rand::thread_rng();
-        let vote_accounts_hash_map: VoteAccountsHashMap =
+        let vote_accounts_hash_map: HashMap<Pubkey, (u64, VoteAccount)> =
             new_rand_vote_accounts(&mut rng, 64).take(1024).collect();
         let data = bincode::serialize(&vote_accounts_hash_map).unwrap();
         let vote_accounts: VoteAccounts = bincode::deserialize(&data).unwrap();

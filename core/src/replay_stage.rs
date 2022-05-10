@@ -346,7 +346,7 @@ pub struct ReplayStage {
 
 impl ReplayStage {
     #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
-    pub fn new<T: Into<Tower> + Sized>(
+    pub fn new(
         config: ReplayStageConfig,
         blockstore: Arc<Blockstore>,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -354,7 +354,7 @@ impl ReplayStage {
         ledger_signal_receiver: Receiver<bool>,
         duplicate_slots_receiver: DuplicateSlotReceiver,
         poh_recorder: Arc<Mutex<PohRecorder>>,
-        tower: T,
+        mut tower: Tower,
         vote_tracker: Arc<VoteTracker>,
         cluster_slots: Arc<ClusterSlots>,
         retransmit_slots_sender: RetransmitSlotsSender,
@@ -369,9 +369,6 @@ impl ReplayStage {
         block_metadata_notifier: Option<BlockMetadataNotifierLock>,
         transaction_cost_metrics_sender: Option<TransactionCostMetricsSender>,
     ) -> Self {
-        let mut tower = tower.into();
-        info!("Tower state: {:?}", tower);
-
         let ReplayStageConfig {
             vote_account,
             authorized_voter_keypairs,
@@ -432,14 +429,6 @@ impl ReplayStage {
                     last_refresh_time: Instant::now(),
                     last_print_time: Instant::now(),
                 };
-
-                Self::reset_poh_recorder(
-                    &my_pubkey,
-                    &blockstore,
-                    &bank_forks.read().unwrap().working_bank(),
-                    &poh_recorder,
-                    &leader_schedule_cache,
-                );
 
                 loop {
                     // Stop getting entries if we get exit signal
@@ -1979,7 +1968,8 @@ impl ReplayStage {
         }
         if my_latest_landed_vote >= last_voted_slot
             || heaviest_bank_on_same_fork
-                .is_hash_valid_for_age(&tower.last_vote_tx_blockhash(), MAX_PROCESSING_AGE)
+                .check_hash_age(&tower.last_vote_tx_blockhash(), MAX_PROCESSING_AGE)
+                .unwrap_or(false)
             // In order to avoid voting on multiple forks all past MAX_PROCESSING_AGE that don't
             // include the last voted blockhash
             || last_vote_refresh_time.last_refresh_time.elapsed().as_millis() < MAX_VOTE_REFRESH_INTERVAL_MILLIS as u128
@@ -2315,7 +2305,7 @@ impl ReplayStage {
             }
         }
 
-        // send accumulated execute-timings to cost_update_service
+        // send accumulated excute-timings to cost_update_service
         if !execute_timings.details.per_program_timings.is_empty() {
             cost_update_sender
                 .send(CostUpdate::ExecuteTiming {
@@ -2603,7 +2593,7 @@ impl ReplayStage {
                     */
 
                     // Imagine 90% of validators voted on slot 4, but only 9% landed. If everybody that fails
-                    // the switch threshold abandons slot 4 to build on slot 8 (because it's *currently* heavier),
+                    // the switch theshold abandons slot 4 to build on slot 8 (because it's *currently* heavier),
                     // then there will be no blocks to include the votes for slot 4, and the network halts
                     // because 90% of validators can't vote
                     info!(
@@ -3123,7 +3113,7 @@ impl ReplayStage {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use {
         super::*,
         crate::{
@@ -3142,7 +3132,10 @@ pub(crate) mod tests {
             create_new_tmp_ledger,
             genesis_utils::{create_genesis_config, create_genesis_config_with_leader},
             get_tmp_ledger_path,
-            shred::{Shred, ShredFlags, SIZE_OF_DATA_SHRED_PAYLOAD},
+            shred::{
+                CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, DATA_COMPLETE_SHRED,
+                SIZE_OF_COMMON_SHRED_HEADER, SIZE_OF_DATA_SHRED_HEADER, SIZE_OF_DATA_SHRED_PAYLOAD,
+            },
         },
         solana_rpc::{
             optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
@@ -3158,6 +3151,7 @@ pub(crate) mod tests {
             genesis_config,
             hash::{hash, Hash},
             instruction::InstructionError,
+            packet::PACKET_DATA_SIZE,
             poh_config::PohConfig,
             signature::{Keypair, Signer},
             system_transaction,
@@ -3741,18 +3735,26 @@ pub(crate) mod tests {
     fn test_dead_fork_entry_deserialize_failure() {
         // Insert entry that causes deserialization failure
         let res = check_dead_fork(|_, bank| {
-            let gibberish = [0xa5u8; SIZE_OF_DATA_SHRED_PAYLOAD];
-            let parent_offset = bank.slot() - bank.parent_slot();
-            let shred = Shred::new_from_data(
-                bank.slot(),
-                0, // index,
-                parent_offset as u16,
-                &gibberish,
-                ShredFlags::DATA_COMPLETE_SHRED,
-                0, // reference_tick
-                0, // version
-                0, // fec_set_index
+            let gibberish = [0xa5u8; PACKET_DATA_SIZE];
+            let mut data_header = DataShredHeader::default();
+            data_header.flags |= DATA_COMPLETE_SHRED;
+            // Need to provide the right size for Shredder::deshred.
+            data_header.size = SIZE_OF_DATA_SHRED_PAYLOAD as u16;
+            data_header.parent_offset = (bank.slot() - bank.parent_slot()) as u16;
+            let shred_common_header = ShredCommonHeader {
+                slot: bank.slot(),
+                ..ShredCommonHeader::default()
+            };
+            let mut shred = Shred::new_empty_from_header(
+                shred_common_header,
+                data_header,
+                CodingShredHeader::default(),
             );
+            bincode::serialize_into(
+                &mut shred.payload[SIZE_OF_COMMON_SHRED_HEADER + SIZE_OF_DATA_SHRED_HEADER..],
+                &gibberish[..SIZE_OF_DATA_SHRED_PAYLOAD],
+            )
+            .unwrap();
             vec![shred]
         });
 
@@ -5864,7 +5866,7 @@ pub(crate) mod tests {
 
         // Simulate landing a vote for slot 0 landing in slot 1
         let bank1 = Arc::new(Bank::new_from_parent(&bank0, &Pubkey::default(), 1));
-        bank1.fill_bank_with_ticks_for_tests();
+        bank1.fill_bank_with_ticks();
         tower.record_bank_vote(&bank0, &my_vote_pubkey);
         ReplayStage::push_vote(
             &bank0,
@@ -5904,7 +5906,7 @@ pub(crate) mod tests {
         // Trying to refresh the vote for bank 0 in bank 1 or bank 2 won't succeed because
         // the last vote has landed already
         let bank2 = Arc::new(Bank::new_from_parent(&bank1, &Pubkey::default(), 2));
-        bank2.fill_bank_with_ticks_for_tests();
+        bank2.fill_bank_with_ticks();
         bank2.freeze();
         for refresh_bank in &[&bank1, &bank2] {
             ReplayStage::refresh_last_vote(
@@ -5986,19 +5988,13 @@ pub(crate) mod tests {
         assert_eq!(tower.last_voted_slot().unwrap(), 1);
 
         // Create a bank where the last vote transaction will have expired
-        let expired_bank = {
-            let mut parent_bank = bank2.clone();
-            for _ in 0..MAX_PROCESSING_AGE {
-                parent_bank = Arc::new(Bank::new_from_parent(
-                    &parent_bank,
-                    &Pubkey::default(),
-                    parent_bank.slot() + 1,
-                ));
-                parent_bank.fill_bank_with_ticks_for_tests();
-                parent_bank.freeze();
-            }
-            parent_bank
-        };
+        let expired_bank = Arc::new(Bank::new_from_parent(
+            &bank2,
+            &Pubkey::default(),
+            bank2.slot() + MAX_PROCESSING_AGE as Slot,
+        ));
+        expired_bank.fill_bank_with_ticks();
+        expired_bank.freeze();
 
         // Now trying to refresh the vote for slot 1 will succeed because the recent blockhash
         // of the last vote transaction has expired
@@ -6061,7 +6057,7 @@ pub(crate) mod tests {
             vote_account.vote_state().as_ref().unwrap().tower(),
             vec![0, 1]
         );
-        expired_bank_child.fill_bank_with_ticks_for_tests();
+        expired_bank_child.fill_bank_with_ticks();
         expired_bank_child.freeze();
 
         // Trying to refresh the vote on a sibling bank where:
@@ -6073,7 +6069,7 @@ pub(crate) mod tests {
             &Pubkey::default(),
             expired_bank_child.slot() + 1,
         ));
-        expired_bank_sibling.fill_bank_with_ticks_for_tests();
+        expired_bank_sibling.fill_bank_with_ticks();
         expired_bank_sibling.freeze();
         // Set the last refresh to now, shouldn't refresh because the last refresh just happened.
         last_vote_refresh_time.last_refresh_time = Instant::now();

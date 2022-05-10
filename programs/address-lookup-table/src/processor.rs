@@ -8,8 +8,11 @@ use {
     },
     solana_program_runtime::{ic_msg, invoke_context::InvokeContext},
     solana_sdk::{
+        account::{ReadableAccount, WritableAccount},
+        account_utils::State,
         clock::Slot,
         instruction::InstructionError,
+        keyed_account::keyed_account_at_index,
         program_utils::limited_deserialize,
         pubkey::{Pubkey, PUBKEY_BYTES},
         system_instruction,
@@ -19,11 +22,9 @@ use {
 
 pub fn process_instruction(
     first_instruction_account: usize,
+    instruction_data: &[u8],
     invoke_context: &mut InvokeContext,
 ) -> Result<(), InstructionError> {
-    let transaction_context = &invoke_context.transaction_context;
-    let instruction_context = transaction_context.get_current_instruction_context()?;
-    let instruction_data = instruction_context.get_instruction_data();
     match limited_deserialize(instruction_data)? {
         ProgramInstruction::CreateLookupTable {
             recent_slot,
@@ -57,40 +58,32 @@ pub struct Processor;
 impl Processor {
     fn create_lookup_table(
         invoke_context: &mut InvokeContext,
-        _first_instruction_account: usize,
+        first_instruction_account: usize,
         untrusted_recent_slot: Slot,
         bump_seed: u8,
     ) -> Result<(), InstructionError> {
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
         let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let lookup_table_lamports = lookup_table_account.get_lamports();
-        let table_key = *lookup_table_account.get_key();
-        if !lookup_table_account.get_data().is_empty() {
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+        if lookup_table_account.data_len()? > 0 {
             ic_msg!(invoke_context, "Table account must not be allocated");
             return Err(InstructionError::AccountAlreadyInitialized);
         }
-        drop(lookup_table_account);
 
         let authority_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-        let authority_key = *authority_account.get_key();
-        if !authority_account.is_signer() {
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 1)?)?;
+        let authority_key = *authority_account.signer_key().ok_or_else(|| {
             ic_msg!(invoke_context, "Authority account must be a signer");
-            return Err(InstructionError::MissingRequiredSignature);
-        }
-        drop(authority_account);
+            InstructionError::MissingRequiredSignature
+        })?;
 
         let payer_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 2)?;
-        let payer_key = *payer_account.get_key();
-        if !payer_account.is_signer() {
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 2)?)?;
+        let payer_key = *payer_account.signer_key().ok_or_else(|| {
             ic_msg!(invoke_context, "Payer account must be a signer");
-            return Err(InstructionError::MissingRequiredSignature);
-        }
-        drop(payer_account);
+            InstructionError::MissingRequiredSignature
+        })?;
 
         let derivation_slot = {
             let slot_hashes = invoke_context.get_sysvar_cache().get_slot_hashes()?;
@@ -117,6 +110,7 @@ impl Processor {
             &crate::id(),
         )?;
 
+        let table_key = *lookup_table_account.unsigned_key();
         if table_key != derived_table_key {
             ic_msg!(
                 invoke_context,
@@ -131,7 +125,7 @@ impl Processor {
         let required_lamports = rent
             .minimum_balance(table_account_data_len)
             .max(1)
-            .saturating_sub(lookup_table_lamports);
+            .saturating_sub(lookup_table_account.lamports()?);
 
         if required_lamports > 0 {
             invoke_context.native_invoke(
@@ -150,10 +144,9 @@ impl Processor {
             &[table_key],
         )?;
 
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
-        let mut lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
+        let lookup_table_account =
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
         lookup_table_account.set_state(&ProgramState::LookupTable(LookupTableMeta::new(
             authority_key,
         )))?;
@@ -163,37 +156,31 @@ impl Processor {
 
     fn freeze_lookup_table(
         invoke_context: &mut InvokeContext,
-        _first_instruction_account: usize,
+        first_instruction_account: usize,
     ) -> Result<(), InstructionError> {
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
         let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        if *lookup_table_account.get_owner() != crate::id() {
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+        if lookup_table_account.owner()? != crate::id() {
             return Err(InstructionError::InvalidAccountOwner);
         }
-        drop(lookup_table_account);
 
         let authority_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-        let authority_key = *authority_account.get_key();
-        if !authority_account.is_signer() {
-            ic_msg!(invoke_context, "Authority account must be a signer");
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 1)?)?;
+        if authority_account.signer_key().is_none() {
             return Err(InstructionError::MissingRequiredSignature);
         }
-        drop(authority_account);
 
-        let mut lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let lookup_table_data = lookup_table_account.get_data();
+        let lookup_table_account_ref = lookup_table_account.try_account_ref()?;
+        let lookup_table_data = lookup_table_account_ref.data();
         let lookup_table = AddressLookupTable::deserialize(lookup_table_data)?;
 
         if lookup_table.meta.authority.is_none() {
             ic_msg!(invoke_context, "Lookup table is already frozen");
             return Err(InstructionError::Immutable);
         }
-        if lookup_table.meta.authority != Some(authority_key) {
+        if lookup_table.meta.authority != Some(*authority_account.unsigned_key()) {
             return Err(InstructionError::IncorrectAuthority);
         }
         if lookup_table.meta.deactivation_slot != Slot::MAX {
@@ -206,9 +193,13 @@ impl Processor {
         }
 
         let mut lookup_table_meta = lookup_table.meta;
+        drop(lookup_table_account_ref);
+
         lookup_table_meta.authority = None;
         AddressLookupTable::overwrite_meta_data(
-            lookup_table_account.get_data_mut(),
+            lookup_table_account
+                .try_account_ref_mut()?
+                .data_as_mut_slice(),
             lookup_table_meta,
         )?;
 
@@ -217,39 +208,31 @@ impl Processor {
 
     fn extend_lookup_table(
         invoke_context: &mut InvokeContext,
-        _first_instruction_account: usize,
+        first_instruction_account: usize,
         new_addresses: Vec<Pubkey>,
     ) -> Result<(), InstructionError> {
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
         let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let table_key = *lookup_table_account.get_key();
-        if *lookup_table_account.get_owner() != crate::id() {
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+        if lookup_table_account.owner()? != crate::id() {
             return Err(InstructionError::InvalidAccountOwner);
         }
-        drop(lookup_table_account);
 
         let authority_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-        let authority_key = *authority_account.get_key();
-        if !authority_account.is_signer() {
-            ic_msg!(invoke_context, "Authority account must be a signer");
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 1)?)?;
+        if authority_account.signer_key().is_none() {
             return Err(InstructionError::MissingRequiredSignature);
         }
-        drop(authority_account);
 
-        let mut lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let lookup_table_data = lookup_table_account.get_data();
-        let lookup_table_lamports = lookup_table_account.get_lamports();
+        let lookup_table_account_ref = lookup_table_account.try_account_ref()?;
+        let lookup_table_data = lookup_table_account_ref.data();
         let mut lookup_table = AddressLookupTable::deserialize(lookup_table_data)?;
 
         if lookup_table.meta.authority.is_none() {
             return Err(InstructionError::Immutable);
         }
-        if lookup_table.meta.authority != Some(authority_key) {
+        if lookup_table.meta.authority != Some(*authority_account.unsigned_key()) {
             return Err(InstructionError::IncorrectAuthority);
         }
         if lookup_table.meta.deactivation_slot != Slot::MAX {
@@ -295,36 +278,42 @@ impl Processor {
         }
 
         let lookup_table_meta = lookup_table.meta;
+        drop(lookup_table_account_ref);
+
         let new_table_data_len = checked_add(
             LOOKUP_TABLE_META_SIZE,
             new_table_addresses_len.saturating_mul(PUBKEY_BYTES),
         )?;
 
         {
-            let mut table_data = lookup_table_account.get_data_mut().to_vec();
-            AddressLookupTable::overwrite_meta_data(&mut table_data, lookup_table_meta)?;
+            let mut lookup_table_account_ref_mut = lookup_table_account.try_account_ref_mut()?;
+            AddressLookupTable::overwrite_meta_data(
+                lookup_table_account_ref_mut.data_as_mut_slice(),
+                lookup_table_meta,
+            )?;
+
+            let table_data = lookup_table_account_ref_mut.data_mut();
             for new_address in new_addresses {
                 table_data.extend_from_slice(new_address.as_ref());
             }
-            lookup_table_account.set_data(&table_data);
         }
-        drop(lookup_table_account);
 
         let rent = invoke_context.get_sysvar_cache().get_rent()?;
         let required_lamports = rent
             .minimum_balance(new_table_data_len)
             .max(1)
-            .saturating_sub(lookup_table_lamports);
+            .saturating_sub(lookup_table_account.lamports()?);
 
+        let table_key = *lookup_table_account.unsigned_key();
         if required_lamports > 0 {
             let payer_account =
-                instruction_context.try_borrow_instruction_account(transaction_context, 2)?;
-            let payer_key = *payer_account.get_key();
-            if !payer_account.is_signer() {
+                keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 2)?)?;
+            let payer_key = if let Some(payer_key) = payer_account.signer_key() {
+                *payer_key
+            } else {
                 ic_msg!(invoke_context, "Payer account must be a signer");
                 return Err(InstructionError::MissingRequiredSignature);
-            }
-            drop(payer_account);
+            };
 
             invoke_context.native_invoke(
                 system_instruction::transfer(&payer_key, &table_key, required_lamports),
@@ -337,37 +326,31 @@ impl Processor {
 
     fn deactivate_lookup_table(
         invoke_context: &mut InvokeContext,
-        _first_instruction_account: usize,
+        first_instruction_account: usize,
     ) -> Result<(), InstructionError> {
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
         let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        if *lookup_table_account.get_owner() != crate::id() {
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+        if lookup_table_account.owner()? != crate::id() {
             return Err(InstructionError::InvalidAccountOwner);
         }
-        drop(lookup_table_account);
 
         let authority_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-        let authority_key = *authority_account.get_key();
-        if !authority_account.is_signer() {
-            ic_msg!(invoke_context, "Authority account must be a signer");
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 1)?)?;
+        if authority_account.signer_key().is_none() {
             return Err(InstructionError::MissingRequiredSignature);
         }
-        drop(authority_account);
 
-        let mut lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let lookup_table_data = lookup_table_account.get_data();
+        let lookup_table_account_ref = lookup_table_account.try_account_ref()?;
+        let lookup_table_data = lookup_table_account_ref.data();
         let lookup_table = AddressLookupTable::deserialize(lookup_table_data)?;
 
         if lookup_table.meta.authority.is_none() {
             ic_msg!(invoke_context, "Lookup table is frozen");
             return Err(InstructionError::Immutable);
         }
-        if lookup_table.meta.authority != Some(authority_key) {
+        if lookup_table.meta.authority != Some(*authority_account.unsigned_key()) {
             return Err(InstructionError::IncorrectAuthority);
         }
         if lookup_table.meta.deactivation_slot != Slot::MAX {
@@ -376,11 +359,15 @@ impl Processor {
         }
 
         let mut lookup_table_meta = lookup_table.meta;
+        drop(lookup_table_account_ref);
+
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
         lookup_table_meta.deactivation_slot = clock.slot;
 
         AddressLookupTable::overwrite_meta_data(
-            lookup_table_account.get_data_mut(),
+            lookup_table_account
+                .try_account_ref_mut()?
+                .data_as_mut_slice(),
             lookup_table_meta,
         )?;
 
@@ -389,36 +376,25 @@ impl Processor {
 
     fn close_lookup_table(
         invoke_context: &mut InvokeContext,
-        _first_instruction_account: usize,
+        first_instruction_account: usize,
     ) -> Result<(), InstructionError> {
-        let transaction_context = &invoke_context.transaction_context;
-        let instruction_context = transaction_context.get_current_instruction_context()?;
+        let keyed_accounts = invoke_context.get_keyed_accounts()?;
 
         let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        if *lookup_table_account.get_owner() != crate::id() {
+            keyed_account_at_index(keyed_accounts, first_instruction_account)?;
+        if lookup_table_account.owner()? != crate::id() {
             return Err(InstructionError::InvalidAccountOwner);
         }
-        drop(lookup_table_account);
 
         let authority_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
-        let authority_key = *authority_account.get_key();
-        if !authority_account.is_signer() {
-            ic_msg!(invoke_context, "Authority account must be a signer");
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 1)?)?;
+        if authority_account.signer_key().is_none() {
             return Err(InstructionError::MissingRequiredSignature);
         }
-        drop(authority_account);
 
-        instruction_context.check_number_of_instruction_accounts(3)?;
-        if instruction_context
-            .get_index_in_transaction(instruction_context.get_number_of_program_accounts())?
-            == instruction_context.get_index_in_transaction(
-                instruction_context
-                    .get_number_of_program_accounts()
-                    .saturating_add(2),
-            )?
-        {
+        let recipient_account =
+            keyed_account_at_index(keyed_accounts, checked_add(first_instruction_account, 2)?)?;
+        if recipient_account.unsigned_key() == lookup_table_account.unsigned_key() {
             ic_msg!(
                 invoke_context,
                 "Lookup table cannot be the recipient of reclaimed lamports"
@@ -426,17 +402,15 @@ impl Processor {
             return Err(InstructionError::InvalidArgument);
         }
 
-        let lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        let withdrawn_lamports = lookup_table_account.get_lamports();
-        let lookup_table_data = lookup_table_account.get_data();
+        let lookup_table_account_ref = lookup_table_account.try_account_ref()?;
+        let lookup_table_data = lookup_table_account_ref.data();
         let lookup_table = AddressLookupTable::deserialize(lookup_table_data)?;
 
         if lookup_table.meta.authority.is_none() {
             ic_msg!(invoke_context, "Lookup table is frozen");
             return Err(InstructionError::Immutable);
         }
-        if lookup_table.meta.authority != Some(authority_key) {
+        if lookup_table.meta.authority != Some(*authority_account.unsigned_key()) {
             return Err(InstructionError::IncorrectAuthority);
         }
 
@@ -459,16 +433,16 @@ impl Processor {
             }
             LookupTableStatus::Deactivated => Ok(()),
         }?;
-        drop(lookup_table_account);
 
-        let mut recipient_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 2)?;
-        recipient_account.checked_add_lamports(withdrawn_lamports)?;
-        drop(recipient_account);
+        drop(lookup_table_account_ref);
 
-        let mut lookup_table_account =
-            instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        lookup_table_account.set_data(&[]);
+        let withdrawn_lamports = lookup_table_account.lamports()?;
+        recipient_account
+            .try_account_ref_mut()?
+            .checked_add_lamports(withdrawn_lamports)?;
+
+        let mut lookup_table_account = lookup_table_account.try_account_ref_mut()?;
+        lookup_table_account.set_data(Vec::new());
         lookup_table_account.set_lamports(0);
 
         Ok(())

@@ -107,7 +107,7 @@ pub fn create_and_add_stakes(
 
     let mut address_generator = AddressGenerator::new(&authorized.staker, &stake::program::id());
 
-    let stake_rent_reserve = genesis_config.rent.minimum_balance(StakeState::size_of());
+    let stake_rent_reserve = StakeState::get_rent_exempt_reserve(&genesis_config.rent);
 
     for unlock in unlocks {
         let lamports = unlock.amount(stakes_lamports);
@@ -193,7 +193,7 @@ mod tests {
             .iter()
             .all(|(_pubkey, account)| account.lamports <= granularity
                 || account.lamports - granularity
-                    <= genesis_config.rent.minimum_balance(StakeState::size_of())));
+                    <= StakeState::get_rent_exempt_reserve(&genesis_config.rent)));
     }
 
     //    #[ignore]
@@ -238,7 +238,7 @@ mod tests {
             ..Rent::default()
         };
 
-        let reserve = rent.minimum_balance(StakeState::size_of());
+        let reserve = StakeState::get_rent_exempt_reserve(&rent);
         let staker_reserve = rent.minimum_balance(0);
 
         // verify that a small remainder ends up in the last stake

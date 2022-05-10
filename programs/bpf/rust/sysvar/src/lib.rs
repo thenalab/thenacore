@@ -2,8 +2,6 @@
 
 extern crate solana_program;
 #[allow(deprecated)]
-use solana_program::sysvar::fees::Fees;
-#[allow(deprecated)]
 use solana_program::sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_program::{
     account_info::AccountInfo,
@@ -23,7 +21,7 @@ solana_program::entrypoint!(process_instruction);
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    instruction_data: &[u8],
+    _instruction_data: &[u8],
 ) -> ProgramResult {
     // Clock
     {
@@ -56,7 +54,7 @@ pub fn process_instruction(
         instruction,
         Instruction::new_with_bytes(
             *program_id,
-            instruction_data,
+            &[] as &[u8],
             vec![
                 AccountMeta::new(*accounts[0].key, true),
                 AccountMeta::new(*accounts[1].key, false),
@@ -68,7 +66,6 @@ pub fn process_instruction(
                 AccountMeta::new_readonly(*accounts[7].key, false),
                 AccountMeta::new_readonly(*accounts[8].key, false),
                 AccountMeta::new_readonly(*accounts[9].key, false),
-                AccountMeta::new_readonly(*accounts[10].key, false),
             ],
         )
     );
@@ -112,16 +109,6 @@ pub fn process_instruction(
     msg!("StakeHistory identifier:");
     sysvar::stake_history::id().log();
     let _ = StakeHistory::from_account_info(&accounts[9]).unwrap();
-
-    // Fees
-    #[allow(deprecated)]
-    if instruction_data[0] == 1 {
-        msg!("Fee identifier:");
-        sysvar::fees::id().log();
-        let fees = Fees::from_account_info(&accounts[10]).unwrap();
-        let got_fees = Fees::get()?;
-        assert_eq!(fees, got_fees);
-    }
 
     Ok(())
 }

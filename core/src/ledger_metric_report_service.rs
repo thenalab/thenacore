@@ -13,9 +13,7 @@ use {
     },
 };
 
-// Determines how often we report blockstore metrics under
-// LedgerMetricReportService.  Note that there're other blockstore
-// metrics that are reported outside LedgerMetricReportService.
+// Determines how often we report blockstore metrics.
 const BLOCKSTORE_METRICS_REPORT_PERIOD_MILLIS: u64 = 10000;
 
 pub struct LedgerMetricReportService {

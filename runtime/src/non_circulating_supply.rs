@@ -265,7 +265,7 @@ mod tests {
             let stake_account = Account::new_data_with_space(
                 balance,
                 &StakeState::Initialized(meta),
-                StakeState::size_of(),
+                std::mem::size_of::<StakeState>(),
                 &stake::program::id(),
             )
             .unwrap();

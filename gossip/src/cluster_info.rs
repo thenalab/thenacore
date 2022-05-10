@@ -53,7 +53,10 @@ use {
     },
     solana_perf::{
         data_budget::DataBudget,
-        packet::{limited_deserialize, Packet, PacketBatch, PacketBatchRecycler, PACKET_DATA_SIZE},
+        packet::{
+            limited_deserialize, to_packet_batch_with_destination, Packet, PacketBatch,
+            PacketBatchRecycler, PACKET_DATA_SIZE,
+        },
     },
     solana_rayon_threadlimit::get_thread_count,
     solana_runtime::{bank_forks::BankForks, vote_parser},
@@ -1564,11 +1567,7 @@ impl ClusterInfo {
             generate_pull_requests,
         );
         if !reqs.is_empty() {
-            let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-                recycler.clone(),
-                "run_gossip",
-                &reqs,
-            );
+            let packet_batch = to_packet_batch_with_destination(recycler.clone(), &reqs);
             self.stats
                 .packets_sent_gossip_requests_count
                 .add_relaxed(packet_batch.packets.len() as u64);
@@ -2161,21 +2160,27 @@ impl ClusterInfo {
         I: IntoIterator<Item = (SocketAddr, Ping)>,
     {
         let keypair = self.keypair();
-        let pongs_and_dests: Vec<_> = pings
+        let packets: Vec<_> = pings
             .into_iter()
             .filter_map(|(addr, ping)| {
                 let pong = Pong::new(&ping, &keypair).ok()?;
                 let pong = Protocol::PongMessage(pong);
-                Some((addr, pong))
+                match Packet::from_data(Some(&addr), pong) {
+                    Ok(packet) => Some(packet),
+                    Err(err) => {
+                        error!("failed to write pong packet: {:?}", err);
+                        None
+                    }
+                }
             })
             .collect();
-        if pongs_and_dests.is_empty() {
+        if packets.is_empty() {
             None
         } else {
-            let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-                recycler.clone(),
+            let packet_batch = PacketBatch::new_unpinned_with_recycler_data(
+                recycler,
                 "handle_ping_messages",
-                &pongs_and_dests,
+                packets,
             );
             Some(packet_batch)
         }
@@ -2279,11 +2284,7 @@ impl ClusterInfo {
         if prune_messages.is_empty() {
             return;
         }
-        let mut packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-            recycler.clone(),
-            "handle_batch_push_messages",
-            &prune_messages,
-        );
+        let mut packet_batch = to_packet_batch_with_destination(recycler.clone(), &prune_messages);
         let num_prune_packets = packet_batch.packets.len();
         self.stats
             .push_response_count
@@ -2960,11 +2961,7 @@ pub fn push_messages_to_peer(
     let reqs: Vec<_> = ClusterInfo::split_gossip_messages(PUSH_MESSAGE_MAX_PAYLOAD_SIZE, messages)
         .map(move |payload| (peer_gossip, Protocol::PushMessage(self_id, payload)))
         .collect();
-    let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-        PacketBatchRecycler::default(),
-        "push_messages_to_peer",
-        &reqs,
-    );
+    let packet_batch = to_packet_batch_with_destination(PacketBatchRecycler::default(), &reqs);
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap();
     packet::send_to(&packet_batch, &sock, socket_addr_space)?;
     Ok(())
@@ -3346,12 +3343,9 @@ mod tests {
         let keypair = Keypair::new();
         let (slot, parent_slot, reference_tick, version) = (53084024, 53084023, 0, 0);
         let shredder = Shredder::new(slot, parent_slot, reference_tick, version).unwrap();
-        let next_shred_index = rng.gen_range(0, 32_000);
+        let next_shred_index = rng.gen();
         let shred = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
-        let other_payload = {
-            let other_shred = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader);
-            other_shred.into_payload()
-        };
+        let other_payload = new_rand_shred(&mut rng, next_shred_index, &shredder, &leader).payload;
         let leader_schedule = |s| {
             if s == slot {
                 Some(leader.pubkey())

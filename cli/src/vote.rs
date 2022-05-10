@@ -1140,7 +1140,7 @@ pub fn process_vote_update_commission(
     }
 }
 
-pub(crate) fn get_vote_account(
+fn get_vote_account(
     rpc_client: &RpcClient,
     vote_account_pubkey: &Pubkey,
     commitment_config: CommitmentConfig,

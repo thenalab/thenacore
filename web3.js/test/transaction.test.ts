@@ -134,7 +134,7 @@ describe('Transaction', () => {
 
     const fee = await transaction.getEstimatedFee(connection);
     expect(fee).to.eq(5000);
-  }).timeout(60 * 1000);
+  });
 
   it('partialSign', () => {
     const account1 = Keypair.generate();
@@ -365,14 +365,14 @@ describe('Transaction', () => {
     }).add(transfer);
     expectedTransaction.sign(sender);
 
-    const serializedTransaction = Buffer.from(
+    const wireTransaction = Buffer.from(
       'AVuErQHaXv0SG0/PchunfxHKt8wMRfMZzqV0tkC5qO6owYxWU2v871AoWywGoFQr4z+q/7mE8lIufNl/kxj+nQ0BAAEDE5j2LG0aRXxRumpLXz29L2n8qTIWIY3ImX5Ba9F9k8r9Q5/Mtmcn8onFxt47xKj+XdXXd3C8j/FcPu7csUrz/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAxJrndgN4IFTxep3s6kO0ROug7bEsbx0xxuDkqEvwUusBAgIAAQwCAAAAMQAAAAAAAAA=',
       'base64',
     );
-    const deserializedTransaction = Transaction.from(serializedTransaction);
+    const tx = Transaction.from(wireTransaction);
 
-    expect(expectedTransaction.serialize()).to.eql(serializedTransaction);
-    expect(deserializedTransaction.serialize()).to.eql(serializedTransaction);
+    expect(tx).to.eql(expectedTransaction);
+    expect(wireTransaction).to.eql(expectedTransaction.serialize());
   });
 
   it('populate transaction', () => {
@@ -409,11 +409,6 @@ describe('Transaction', () => {
     expect(transaction.instructions).to.have.length(1);
     expect(transaction.signatures).to.have.length(2);
     expect(transaction.recentBlockhash).to.eq(recentBlockhash);
-
-    transaction.feePayer = new PublicKey(6);
-    expect(() => transaction.compileMessage()).to.throw(
-      'Transaction message mutated after being populated from Message',
-    );
   });
 
   it('serialize unsigned transaction', () => {
@@ -612,8 +607,8 @@ describe('Transaction', () => {
         programId: Keypair.generate().publicKey,
       }),
     );
-    const t1 = Transaction.from(t0.serialize({requireAllSignatures: false}));
-    t1.partialSign(signer);
+    t0.partialSign(signer);
+    const t1 = Transaction.from(t0.serialize());
     t1.serialize();
   });
 });

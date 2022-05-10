@@ -1,5 +1,3 @@
-//! Account information.
-
 use {
     crate::{
         clock::Epoch, debug_account_data::*, program_error::ProgramError,

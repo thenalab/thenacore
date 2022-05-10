@@ -12,7 +12,6 @@ use {
         pubkey::Pubkey,
         signature::Signature,
         transaction::{Transaction, TransactionError, VersionedTransaction},
-        transaction_context::TransactionReturnData,
     },
     solana_transaction_status::{
         ConfirmedBlock, InnerInstructions, Reward, RewardType, TransactionByAddrInfo,
@@ -364,7 +363,6 @@ impl From<TransactionStatusMeta> for generated::TransactionStatusMeta {
             post_token_balances,
             rewards,
             loaded_addresses,
-            return_data,
         } = value;
         let err = match status {
             Ok(()) => None,
@@ -405,8 +403,6 @@ impl From<TransactionStatusMeta> for generated::TransactionStatusMeta {
             .into_iter()
             .map(|key| <Pubkey as AsRef<[u8]>>::as_ref(&key).into())
             .collect();
-        let return_data_none = return_data.is_none();
-        let return_data = return_data.map(|return_data| return_data.into());
 
         Self {
             err,
@@ -422,8 +418,6 @@ impl From<TransactionStatusMeta> for generated::TransactionStatusMeta {
             rewards,
             loaded_writable_addresses,
             loaded_readonly_addresses,
-            return_data,
-            return_data_none,
         }
     }
 }
@@ -453,8 +447,6 @@ impl TryFrom<generated::TransactionStatusMeta> for TransactionStatusMeta {
             rewards,
             loaded_writable_addresses,
             loaded_readonly_addresses,
-            return_data,
-            return_data_none,
         } = value;
         let status = match &err {
             None => Ok(()),
@@ -498,11 +490,6 @@ impl TryFrom<generated::TransactionStatusMeta> for TransactionStatusMeta {
                 .map(|key| Pubkey::new(&key))
                 .collect(),
         };
-        let return_data = if return_data_none {
-            None
-        } else {
-            return_data.map(|return_data| return_data.into())
-        };
         Ok(Self {
             status,
             fee,
@@ -514,7 +501,6 @@ impl TryFrom<generated::TransactionStatusMeta> for TransactionStatusMeta {
             post_token_balances,
             rewards,
             loaded_addresses,
-            return_data,
         })
     }
 }
@@ -549,7 +535,6 @@ impl From<TransactionTokenBalance> for generated::TokenBalance {
                 ui_amount_string: value.ui_token_amount.ui_amount_string,
             }),
             owner: value.owner,
-            program_id: value.program_id,
         }
     }
 }
@@ -578,7 +563,6 @@ impl From<generated::TokenBalance> for TransactionTokenBalance {
                 },
             },
             owner: value.owner,
-            program_id: value.program_id,
         }
     }
 }
@@ -599,24 +583,6 @@ impl From<generated::MessageAddressTableLookup> for MessageAddressTableLookup {
             account_key: Pubkey::new(&value.account_key),
             writable_indexes: value.writable_indexes,
             readonly_indexes: value.readonly_indexes,
-        }
-    }
-}
-
-impl From<TransactionReturnData> for generated::ReturnData {
-    fn from(value: TransactionReturnData) -> Self {
-        Self {
-            program_id: <Pubkey as AsRef<[u8]>>::as_ref(&value.program_id).into(),
-            data: value.data,
-        }
-    }
-}
-
-impl From<generated::ReturnData> for TransactionReturnData {
-    fn from(value: generated::ReturnData) -> Self {
-        Self {
-            program_id: Pubkey::new(&value.program_id),
-            data: value.data,
         }
     }
 }

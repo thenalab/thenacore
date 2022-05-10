@@ -2,13 +2,13 @@ import React from "react";
 import bs58 from "bs58";
 import { Connection, Message, Transaction } from "@solana/web3.js";
 import { useCluster } from "providers/cluster";
-import { InstructionLogs, parseProgramLogs } from "utils/program-logs";
+import { InstructionLogs, prettyProgramLogs } from "utils/program-logs";
 import { ProgramLogsCardBody } from "components/ProgramLogsCardBody";
 
 const DEFAULT_SIGNATURE = bs58.encode(Buffer.alloc(64).fill(0));
 
 export function SimulatorCard({ message }: { message: Message }) {
-  const { cluster, url } = useCluster();
+  const { cluster } = useCluster();
   const {
     simulate,
     simulating,
@@ -67,12 +67,7 @@ export function SimulatorCard({ message }: { message: Message }) {
           Retry
         </button>
       </div>
-      <ProgramLogsCardBody
-        message={message}
-        logs={logs}
-        cluster={cluster}
-        url={url}
-      />
+      <ProgramLogsCardBody message={message} logs={logs} cluster={cluster} />
     </div>
   );
 }
@@ -111,7 +106,7 @@ function useSimulator(message: Message) {
         }
 
         // Prettify logs
-        setLogs(parseProgramLogs(resp.value.logs, resp.value.err, cluster));
+        setLogs(prettyProgramLogs(resp.value.logs, resp.value.err, cluster));
       } catch (err) {
         console.error(err);
         setLogs(null);

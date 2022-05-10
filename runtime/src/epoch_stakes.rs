@@ -1,5 +1,5 @@
 use {
-    crate::{stakes::StakesEnum, vote_account::VoteAccountsHashMap},
+    crate::{stakes::Stakes, vote_account::VoteAccount},
     serde::{Deserialize, Serialize},
     solana_sdk::{clock::Epoch, pubkey::Pubkey},
     std::{collections::HashMap, sync::Arc},
@@ -16,27 +16,26 @@ pub struct NodeVoteAccounts {
 
 #[derive(Clone, Debug, Serialize, Deserialize, AbiExample, PartialEq)]
 pub struct EpochStakes {
-    #[serde(with = "crate::stakes::serde_stakes_enum_compat")]
-    stakes: Arc<StakesEnum>,
+    stakes: Arc<Stakes>,
     total_stake: u64,
     node_id_to_vote_accounts: Arc<NodeIdToVoteAccounts>,
     epoch_authorized_voters: Arc<EpochAuthorizedVoters>,
 }
 
 impl EpochStakes {
-    pub(crate) fn new(stakes: Arc<StakesEnum>, leader_schedule_epoch: Epoch) -> Self {
+    pub fn new(stakes: &Stakes, leader_schedule_epoch: Epoch) -> Self {
         let epoch_vote_accounts = stakes.vote_accounts();
         let (total_stake, node_id_to_vote_accounts, epoch_authorized_voters) =
             Self::parse_epoch_vote_accounts(epoch_vote_accounts.as_ref(), leader_schedule_epoch);
         Self {
-            stakes,
+            stakes: Arc::new(stakes.clone()),
             total_stake,
             node_id_to_vote_accounts: Arc::new(node_id_to_vote_accounts),
             epoch_authorized_voters: Arc::new(epoch_authorized_voters),
         }
     }
 
-    pub fn stakes(&self) -> &StakesEnum {
+    pub fn stakes(&self) -> &Stakes {
         &self.stakes
     }
 
@@ -61,7 +60,7 @@ impl EpochStakes {
     }
 
     fn parse_epoch_vote_accounts(
-        epoch_vote_accounts: &VoteAccountsHashMap,
+        epoch_vote_accounts: &HashMap<Pubkey, (u64, VoteAccount)>,
         leader_schedule_epoch: Epoch,
     ) -> (u64, NodeIdToVoteAccounts, EpochAuthorizedVoters) {
         let mut node_id_to_vote_accounts: NodeIdToVoteAccounts = HashMap::new();
@@ -120,7 +119,7 @@ impl EpochStakes {
 #[cfg(test)]
 pub(crate) mod tests {
     use {
-        super::*, crate::vote_account::VoteAccount, solana_sdk::account::AccountSharedData,
+        super::*, solana_sdk::account::AccountSharedData,
         solana_vote_program::vote_state::create_account_with_authorized, std::iter,
     };
 

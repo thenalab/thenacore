@@ -202,11 +202,6 @@ const processTransaction = async ({
     params: [signature, {commitment}],
     result: {err: err || null},
   });
-  await mockRpcMessage({
-    method: 'signatureUnsubscribe',
-    params: [1],
-    result: true,
-  });
 
   return await connection.confirmTransaction(signature, commitment);
 };
@@ -232,11 +227,6 @@ const airdrop = async ({
     method: 'signatureSubscribe',
     params: [signature, {commitment: 'confirmed'}],
     result: {err: null},
-  });
-  await mockRpcMessage({
-    method: 'signatureUnsubscribe',
-    params: [1],
-    result: true,
   });
 
   await connection.confirmTransaction(signature, 'confirmed');

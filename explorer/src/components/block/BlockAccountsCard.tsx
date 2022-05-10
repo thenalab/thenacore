@@ -1,8 +1,6 @@
 import React from "react";
 import { BlockResponse, PublicKey } from "@solana/web3.js";
 import { Address } from "components/common/Address";
-import { Link } from "react-router-dom";
-import { clusterPath } from "utils/url";
 
 type AccountStats = {
   reads: number;
@@ -11,13 +9,7 @@ type AccountStats = {
 
 const PAGE_SIZE = 25;
 
-export function BlockAccountsCard({
-  block,
-  blockSlot,
-}: {
-  block: BlockResponse;
-  blockSlot: number;
-}) {
+export function BlockAccountsCard({ block }: { block: BlockResponse }) {
   const [numDisplayed, setNumDisplayed] = React.useState(10);
   const totalTransactions = block.transactions.length;
 
@@ -84,16 +76,7 @@ export function BlockAccountsCard({
                 return (
                   <tr key={address}>
                     <td>
-                      <Link
-                        to={clusterPath(
-                          `/block/${blockSlot}`,
-                          new URLSearchParams(
-                            `accountFilter=${address}&filter=all`
-                          )
-                        )}
-                      >
-                        <Address pubkey={new PublicKey(address)} />
-                      </Link>
+                      <Address pubkey={new PublicKey(address)} link />
                     </td>
                     <td>{writes}</td>
                     <td>{reads}</td>

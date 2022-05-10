@@ -1,6 +1,4 @@
-//! Instructions for the [upgradable BPF loader][ubpfl].
-//!
-//! [ubpfl]: crate::bpf_loader_upgradeable
+//! Upgradeable loader instruction definitions
 
 #[repr(u8)]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]

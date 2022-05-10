@@ -1,11 +1,11 @@
-use clap::{Arg, Command};
+use clap::{App, Arg};
 
 fn main() {
     solana_logger::setup();
-    let matches = Command::new("solana-ip-address")
+    let matches = App::new("solana-ip-address")
         .version(solana_version::version!())
         .arg(
-            Arg::new("host_port")
+            Arg::with_name("host_port")
                 .index(1)
                 .required(true)
                 .help("Host:port to connect to"),

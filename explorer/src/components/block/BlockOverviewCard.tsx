@@ -14,7 +14,6 @@ import { BlockProgramsCard } from "./BlockProgramsCard";
 import { BlockAccountsCard } from "./BlockAccountsCard";
 import { displayTimestamp, displayTimestampUtc } from "utils/date";
 import { Epoch } from "components/common/Epoch";
-import { Address } from "components/common/Address";
 
 export function BlockOverviewCard({
   slot,
@@ -44,14 +43,8 @@ export function BlockOverviewCard({
     return <ErrorCard retry={refresh} text={`Block ${slot} was not found`} />;
   }
 
-  const { block, blockLeader, childSlot, childLeader, parentLeader } =
-    confirmedBlock.data;
-  const showSuccessfulCount = block.transactions.every(
-    (tx) => tx.meta !== null
-  );
-  const successfulTxs = block.transactions.filter(
-    (tx) => tx.meta?.err === null
-  );
+  const block = confirmedBlock.data.block;
+  const committedTxs = block.transactions.filter((tx) => tx.meta?.err === null);
   const epoch = clusterInfo?.epochSchedule.getEpoch(slot);
 
   return (
@@ -64,25 +57,17 @@ export function BlockOverviewCard({
         </div>
         <TableCardBody>
           <tr>
-            <td className="w-100">Blockhash</td>
-            <td className="text-lg-end font-monospace">
-              <span>{block.blockhash}</span>
-            </td>
-          </tr>
-          <tr>
             <td className="w-100">Slot</td>
             <td className="text-lg-end font-monospace">
               <Slot slot={slot} />
             </td>
           </tr>
-          {blockLeader !== undefined && (
-            <tr>
-              <td className="w-100">Slot Leader</td>
-              <td className="text-lg-end">
-                <Address pubkey={blockLeader} alignRight link />
-              </td>
-            </tr>
-          )}
+          <tr>
+            <td className="w-100">Blockhash</td>
+            <td className="text-lg-end font-monospace">
+              <span>{block.blockhash}</span>
+            </td>
+          </tr>
           {block.blockTime ? (
             <>
               <tr>
@@ -108,6 +93,12 @@ export function BlockOverviewCard({
               <td className="text-lg-end">Unavailable</td>
             </tr>
           )}
+          <tr>
+            <td className="w-100">Parent Slot</td>
+            <td className="text-lg-end font-monospace">
+              <Slot slot={block.parentSlot} link />
+            </td>
+          </tr>
           {epoch !== undefined && (
             <tr>
               <td className="w-100">Epoch</td>
@@ -122,33 +113,11 @@ export function BlockOverviewCard({
               <span>{block.previousBlockhash}</span>
             </td>
           </tr>
-          <tr>
-            <td className="w-100">Parent Slot</td>
-            <td className="text-lg-end font-monospace">
-              <Slot slot={block.parentSlot} link />
-            </td>
-          </tr>
-          {parentLeader !== undefined && (
-            <tr>
-              <td className="w-100">Parent Slot Leader</td>
-              <td className="text-lg-end">
-                <Address pubkey={parentLeader} alignRight link />
-              </td>
-            </tr>
-          )}
-          {childSlot !== undefined && (
+          {confirmedBlock.data.child && (
             <tr>
               <td className="w-100">Child Slot</td>
               <td className="text-lg-end font-monospace">
-                <Slot slot={childSlot} link />
-              </td>
-            </tr>
-          )}
-          {childLeader !== undefined && (
-            <tr>
-              <td className="w-100">Child Slot Leader</td>
-              <td className="text-lg-end">
-                <Address pubkey={childLeader} alignRight link />
+                <Slot slot={confirmedBlock.data.child} link />
               </td>
             </tr>
           )}
@@ -158,14 +127,12 @@ export function BlockOverviewCard({
               <span>{block.transactions.length}</span>
             </td>
           </tr>
-          {showSuccessfulCount && (
-            <tr>
-              <td className="w-100">Successful Transactions</td>
-              <td className="text-lg-end font-monospace">
-                <span>{successfulTxs.length}</span>
-              </td>
-            </tr>
-          )}
+          <tr>
+            <td className="w-100">Successful Transactions</td>
+            <td className="text-lg-end font-monospace">
+              <span>{committedTxs.length}</span>
+            </td>
+          </tr>
         </TableCardBody>
       </div>
 
@@ -237,9 +204,7 @@ function MoreSection({
       </div>
       {tab === undefined && <BlockHistoryCard block={block} />}
       {tab === "rewards" && <BlockRewardsCard block={block} />}
-      {tab === "accounts" && (
-        <BlockAccountsCard block={block} blockSlot={slot} />
-      )}
+      {tab === "accounts" && <BlockAccountsCard block={block} />}
       {tab === "programs" && <BlockProgramsCard block={block} />}
     </>
   );

@@ -1,4 +1,4 @@
-//! Configuration for epochs and slots.
+//! configuration for epochs, slots
 
 /// 1 Epoch = 400 * 8192 ms ~= 55 minutes
 pub use crate::clock::{Epoch, Slot, DEFAULT_SLOTS_PER_EPOCH};

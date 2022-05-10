@@ -152,21 +152,6 @@ impl ConnectionCacheStats {
                 self.total_client_stats.tx_acks.load_and_reset(),
                 i64
             ),
-            (
-                "num_packets",
-                self.sent_packets.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "total_batches",
-                self.total_batches.swap(0, Ordering::Relaxed),
-                i64
-            ),
-            (
-                "batch_failure",
-                self.batch_failure.swap(0, Ordering::Relaxed),
-                i64
-            ),
         );
     }
 }

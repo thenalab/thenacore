@@ -1,5 +1,3 @@
-//! Compact serde-encoding of vectors with small length.
-
 #![allow(clippy::integer_arithmetic)]
 use {
     serde::{

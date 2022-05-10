@@ -143,7 +143,7 @@ fn is_finalized(
 #[derive(Debug, Default, Clone)]
 pub struct JsonRpcConfig {
     pub enable_rpc_transaction_history: bool,
-    pub enable_extended_tx_metadata_storage: bool,
+    pub enable_cpi_and_log_storage: bool,
     pub faucet_addr: Option<SocketAddr>,
     pub health_check_slot_distance: u64,
     pub rpc_bigtable_config: Option<RpcBigtableConfig>,
@@ -528,7 +528,7 @@ impl JsonRpcRequestProcessor {
                     return Some(RpcInflationReward {
                         epoch,
                         effective_slot: first_confirmed_block_in_epoch,
-                        amount: reward.lamports.unsigned_abs(),
+                        amount: reward.lamports.abs() as u64,
                         post_balance: reward.post_balance,
                         commission: reward.commission,
                     });
@@ -1902,9 +1902,10 @@ impl JsonRpcRequestProcessor {
     ) -> RpcCustomResult<Vec<(Pubkey, AccountSharedData)>> {
         optimize_filters(&mut filters);
         let filter_closure = |account: &AccountSharedData| {
-            filters
-                .iter()
-                .all(|filter_type| filter_type.allows(account))
+            filters.iter().all(|filter_type| match filter_type {
+                RpcFilterType::DataSize(size) => account.data().len() as u64 == *size,
+                RpcFilterType::Memcmp(compare) => compare.bytes_match(account.data()),
+            })
         };
         if self
             .config
@@ -1957,7 +1958,9 @@ impl JsonRpcRequestProcessor {
         // later updates. We include the redundant filters here to avoid returning these accounts.
         //
         // Filter on Token Account state
-        filters.push(RpcFilterType::TokenAccountState);
+        filters.push(RpcFilterType::DataSize(
+            TokenAccount::get_packed_len() as u64
+        ));
         // Filter on Owner address
         filters.push(RpcFilterType::Memcmp(Memcmp {
             offset: SPL_TOKEN_ACCOUNT_OWNER_OFFSET,
@@ -1980,9 +1983,14 @@ impl JsonRpcRequestProcessor {
                     &IndexKey::SplTokenOwner(*owner_key),
                     |account| {
                         account.owner() == program_id
-                            && filters
-                                .iter()
-                                .all(|filter_type| filter_type.allows(account))
+                            && filters.iter().all(|filter_type| match filter_type {
+                                RpcFilterType::DataSize(size) => {
+                                    account.data().len() as u64 == *size
+                                }
+                                RpcFilterType::Memcmp(compare) => {
+                                    compare.bytes_match(account.data())
+                                }
+                            })
                     },
                     &ScanConfig::default(),
                     bank.byte_limit_for_scans(),
@@ -2009,7 +2017,9 @@ impl JsonRpcRequestProcessor {
         // updates. We include the redundant filters here to avoid returning these accounts.
         //
         // Filter on Token Account state
-        filters.push(RpcFilterType::TokenAccountState);
+        filters.push(RpcFilterType::DataSize(
+            TokenAccount::get_packed_len() as u64
+        ));
         // Filter on Mint address
         filters.push(RpcFilterType::Memcmp(Memcmp {
             offset: SPL_TOKEN_ACCOUNT_MINT_OFFSET,
@@ -2031,9 +2041,14 @@ impl JsonRpcRequestProcessor {
                     &IndexKey::SplTokenMint(*mint_key),
                     |account| {
                         account.owner() == program_id
-                            && filters
-                                .iter()
-                                .all(|filter_type| filter_type.allows(account))
+                            && filters.iter().all(|filter_type| match filter_type {
+                                RpcFilterType::DataSize(size) => {
+                                    account.data().len() as u64 == *size
+                                }
+                                RpcFilterType::Memcmp(compare) => {
+                                    compare.bytes_match(account.data())
+                                }
+                            })
                     },
                     &ScanConfig::default(),
                     bank.byte_limit_for_scans(),
@@ -2634,7 +2649,7 @@ pub mod rpc_minimal {
 }
 
 // RPC interface that only depends on immediate Bank data
-// Expected to be provided by API nodes
+// Expected to be provided by both API nodes and (future) accounts replica nodes
 pub mod rpc_bank {
     use super::*;
     #[rpc]
@@ -3541,7 +3556,6 @@ pub mod rpc_full {
                     logs,
                     post_simulation_accounts: _,
                     units_consumed,
-                    return_data,
                 } = preflight_bank.simulate_transaction(transaction)
                 {
                     match err {
@@ -3559,7 +3573,6 @@ pub mod rpc_full {
                             logs: Some(logs),
                             accounts: None,
                             units_consumed: Some(units_consumed),
-                            return_data: return_data.map(|return_data| return_data.into()),
                         },
                     }
                     .into());
@@ -3617,7 +3630,6 @@ pub mod rpc_full {
                 logs,
                 post_simulation_accounts,
                 units_consumed,
-                return_data,
             } = bank.simulate_transaction(transaction);
 
             let accounts = if let Some(config_accounts) = config.accounts {
@@ -3669,7 +3681,6 @@ pub mod rpc_full {
                     logs: Some(logs),
                     accounts,
                     units_consumed: Some(units_consumed),
-                    return_data: return_data.map(|return_data| return_data.into()),
                 },
             ))
         }
@@ -4291,8 +4302,14 @@ fn sanitize_transaction(
     transaction: VersionedTransaction,
     address_loader: impl AddressLoader,
 ) -> Result<SanitizedTransaction> {
-    SanitizedTransaction::try_create(transaction, MessageHash::Compute, None, address_loader)
-        .map_err(|err| Error::invalid_params(format!("invalid transaction: {}", err)))
+    SanitizedTransaction::try_create(
+        transaction,
+        MessageHash::Compute,
+        None,
+        address_loader,
+        true, // require_static_program_ids
+    )
+    .map_err(|err| Error::invalid_params(format!("invalid transaction: {}", err)))
 }
 
 pub(crate) fn create_validator_exit(exit: &Arc<AtomicBool>) -> Arc<RwLock<Exit>> {
@@ -5568,7 +5585,6 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
-                    "returnData":null,
                     "unitsConsumed":0
                 }
             },
@@ -5655,7 +5671,6 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
-                    "returnData":null,
                     "unitsConsumed":0
                 }
             },
@@ -5684,7 +5699,6 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
-                    "returnData":null,
                     "unitsConsumed":0
                 }
             },
@@ -5734,7 +5748,6 @@ pub mod tests {
                     "err":"BlockhashNotFound",
                     "accounts":null,
                     "logs":[],
-                    "returnData":null,
                     "unitsConsumed":0
                 }
             },
@@ -5764,7 +5777,6 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
-                    "returnData":null,
                     "unitsConsumed":0
                 }
             },
@@ -6122,7 +6134,7 @@ pub mod tests {
         assert_eq!(
             res,
             Some(
-                r#"{"jsonrpc":"2.0","error":{"code":-32002,"message":"Transaction simulation failed: Blockhash not found","data":{"accounts":null,"err":"BlockhashNotFound","logs":[],"returnData":null,"unitsConsumed":0}},"id":1}"#.to_string(),
+                r#"{"jsonrpc":"2.0","error":{"code":-32002,"message":"Transaction simulation failed: Blockhash not found","data":{"accounts":null,"err":"BlockhashNotFound","logs":[],"unitsConsumed":0}},"id":1}"#.to_string(),
             )
         );
 
